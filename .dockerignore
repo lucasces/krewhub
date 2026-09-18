@@ -1,0 +1,6 @@
+.venv/
+.git/
+.kiro/
+__pycache__/
+*.pyc
+krewhub.db
