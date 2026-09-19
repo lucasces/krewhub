@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""CLI fake -- só os dois subcomandos que `app/session_client.py` chama
+via `kubectl exec` (`token` e `logout`), reproduzindo o formato de saída
+que o parser real espera (regex de URL com `?token=`, marcador "✅" de
+sucesso no logout). Não reimplementa nada de auth/sandbox real."""
+
+import sys
+
+if len(sys.argv) >= 2 and sys.argv[1] == "token":
+    ttl = "24h"
+    if "--ttl" in sys.argv:
+        ttl = sys.argv[sys.argv.index("--ttl") + 1]
+    print(f"Sessao criada (ttl={ttl}).")
+    print("Abra: http://localhost:5476/?token=FAKE-TOKEN-VALUE-abc123")
+    sys.exit(0)
+
+if len(sys.argv) >= 2 and sys.argv[1] == "logout":
+    print("✅ sessao revogada (fake)")
+    sys.exit(0)
+
+print(f"comando fake-kirocrew nao suportado: {sys.argv[1:]}", file=sys.stderr)
+sys.exit(1)

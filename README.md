@@ -133,6 +133,63 @@ Config (todas opcionais, têm default seguro pra este cluster — exceto as
 | `KREWHUB_SELF_HOST` | vazio -- se setado, auto-registra a própria rota no CHP no startup (ver seção "Deploy no cluster") |
 | `KREWHUB_SELF_PORT` | `8080` |
 
+## Testes automatizados (suíte rápida, offline -- 109 testes, ~1.4s)
+
+Suíte de **regressão pra rodar antes de cada deploy** -- diferente do
+smoke-test manual documentado nas seções abaixo ("Provado ao vivo" e as
+demais, sempre marcadas "testado ao vivo"), que segue existindo como
+procedimento manual contra o cluster real com um owner descartável. Esta
+suíte NUNCA toca o cluster real nem a rede real: todo `kubectl exec`
+(`session_client`/`kiro_login`/`chp_client`) e todo client k8s
+(`k8s_manager.get_clients`/`reconcile_dev`/etc.) são mockados
+(`unittest.mock`/`monkeypatch`); OIDC (`urllib.request.urlopen`) também é
+mockado. Só SQLite roda de verdade, sempre num arquivo `tmp_path` por
+teste -- rápido e sem estado compartilhado entre testes.
+
+```bash
+./test.sh              # roda tudo
+./test.sh -k lobby      # só os testes que batem "lobby" (pytest -k)
+./test.sh -x -v         # para no primeiro erro, verboso
+```
+
+`python3` não está no PATH por padrão neste NixOS (ver skill
+`nix-develop`) -- `test.sh` bootstrapa um `.venv/` (via `nix develop
+~/personal/nixos#node-22`, que inclui `python3.13`, só na primeira vez)
+e instala `requirements.txt` + `requirements-dev.txt` (`pytest`,
+`httpx2` -- só teste, não vão pra imagem: o `Dockerfile` só copia
+`requirements.txt`) nele antes de rodar. Chamadas seguintes usam
+`.venv/bin/python` direto (auto-contido, não precisa mais de `nix
+develop`).
+
+**Cobertura, por módulo** (`tests/`):
+
+| Arquivo | Cobre |
+|---|---|
+| `test_auth_tokens.py` | `sign_session`/`verify_session` -- válido, expirado, malformado, assinatura adulterada, secret errado, payload forjado |
+| `test_oidc.py` | discovery (mock do `.well-known`), `build_authorization_url` (PKCE S256, state, client_id, redirect_uri), `exchange_code` (claim `email`/fallback `sub`) |
+| `test_root.py` | `GET /` -- redirect pro lobby do PRÓPRIO owner (nunca de query), `Cache-Control: no-store`, sem loop com `/login`/`/callback` |
+| `test_lobby.py` | form vs pular direto pro resultado (`login_mode` salvo), `?reconfigure=1`, validação de `POST` (`mode`/`identity_provider`/`region`, precedência form > env var), os 3 links da página de resultado |
+| `test_provision_session_open.py` | `/provision` idempotente, `/session` 404-se-nunca-provisionado, `/open` redirect com token, `require_owner` (401/403) |
+| `test_kiro_login.py` | validação de `mode`/`identity_provider`/`region` (precedência query > env var), idempotência (`already_logged_in`), + unit tests de `kiro_login.py` (guard clauses, parsing de código/URL, comando `org` vs `personal`) |
+| `test_close_logout.py` | `/close` (revoga, mantém cookie do KrewHub) vs `/logout` (revoga + limpa cookie + redirect), melhor-esforço quando a revogação falha |
+| `test_chp_client.py` | header `Authorization: token <valor>` (não `Bearer`), payload/host do registro de rota |
+| `test_session_client.py` | `kirocrew token`/`kirocrew logout` via exec, filtro por slug (nunca vaza pro pod de outro dev) |
+| `test_k8s_manager.py` | `reconcile_dev` idempotente (create na 1a chamada, patch na 2a, nomes deterministicos), namespace compartilhado |
+| `test_k8s_templates.py` | `slugify` determinístico, nomeação de recursos por slug, `podSelector` da NetworkPolicy escopado ao dev certo |
+
+**Achado ao escrever a suíte (não corrigido às cegas -- documentado
+como é):** `POST /lobby` com `login_mode` OMITIDO por completo devolve
+**422** (validação do próprio FastAPI, campo `Form(...)` obrigatório,
+nunca chega no handler), não 400 -- diferente de `POST /kiro-login`,
+onde `mode` é `Query(None, ...)` (opcional pro FastAPI, checado à mão no
+handler), então lá "ausente" e "inválido" dão os dois 400. `login_mode`
+PRESENTE com valor inválido (ex. `bogus`) continua 400 nos dois casos --
+só o caso "campo inteiramente ausente" diverge entre os dois endpoints.
+Comportamento pré-existente (não introduzido nesta fatia), documentado
+e coberto por teste (`test_post_lobby_without_login_mode_is_422`), não
+alterado -- mudar o tipo do parâmetro pra "consertar" isso é uma decisão
+de API que cabe perguntar antes, não presumir.
+
 ## Provado ao vivo
 
 ```
@@ -1184,6 +1241,167 @@ servidor/PVC) seria uma mudança de produto no próprio `kirocrew`
 estado -- escopo maior que este achado, não uma correção mínima seguro
 de aplicar sem uma decisão explícita.
 
+## Smoke-test em cluster efêmero (terceira camada de teste, engine plugável)
+
+Duas camadas de teste já existiam: `test.sh` (pytest offline, tudo
+mockado) e o smoke-test MANUAL contra o cluster REAL (`galaxy-far-far-away`,
+seções "testado ao vivo" espalhadas por este README). Esta terceira
+camada (`smoke/`) prova o mesmo fluxo ponta a ponta (provision -> rota no
+CHP -> acesso ao dashboard -> close -> logout -> cleanup) contra um
+cluster Kubernetes **descartável**, sem tocar no cluster real e sem
+depender da imagem pesada/licenciada do kirocrew de verdade.
+
+### Engine de cluster efêmero é plugável -- `smoke/engines/`
+
+`smoke/run_smoke.py` nunca fala com kind/k3d/podman diretamente -- só com
+a interface `ClusterEngine` (`smoke/engines/base.py`): `is_available()`,
+`up()`, `down()`, e um método opcional `load_image()` (como uma imagem
+Docker local chega no cluster é o ponto mais específico de cada engine,
+não faz parte do contrato mínimo). Trocar de engine no futuro não exige
+tocar em `run_smoke.py` nem em `smoke/fake_kirocrew/`.
+
+Seleção via `KREWHUB_SMOKE_K8S_ENGINE`, **sem default silencioso**: sem
+essa env var setada, o script lista as opções conhecidas com o motivo
+exato de `is_available()` de cada uma e sai (código 2) -- rodar o engine
+errado sem perceber (ex.: cair num fallback que aponta pro cluster REAL)
+seria pior que exigir uma escolha explícita.
+
+```bash
+.venv/bin/python smoke/run_smoke.py --list-engines
+KREWHUB_SMOKE_K8S_ENGINE=podman-machine .venv/bin/python smoke/run_smoke.py
+```
+
+### Qual engine funciona neste host hoje: só `podman-machine`
+
+**`kind` e `k3d` NÃO funcionam neste host** (NixOS) -- não são só
+"binário ausente", são duas paredes estruturais reais, confirmadas ao
+tentar antes de escrever a abstração:
+
+1. Ambos rodam "nodes" Kubernetes como containers Docker/Podman que
+   montam `/lib/modules` do HOST por um path hardcoded
+   (`/lib/modules:/lib/modules:ro`). Este host não tem `/lib/modules`
+   clássico -- módulos vivem em
+   `/run/current-system/kernel-modules/lib/modules/<versão>` (layout
+   NixOS). O bind mount aponta pra um diretório vazio/inexistente.
+2. Ambos esperam falar com o container runtime num socket de path fixo
+   (`/var/run/docker.sock` ou equivalente). O socket do Podman aqui é
+   rootless, em `$XDG_RUNTIME_DIR/podman/podman.sock` -- não no path que
+   os node-containers de kind/k3d embutem.
+
+Nenhuma das duas é contornável sem um workaround frágil (patch manual de
+manifesto do kindnet, symlink fake de socket em `/var/run`, que exigiria
+root e mascarar um caminho do sistema) -- o plano pediu pra reportar isso
+em vez de aplicar. `smoke/engines/kind.py` e `k3d.py` ficam só como
+stubs: interface pronta, `is_available()` documenta o motivo exato,
+`up()`/`down()` levantam `EngineError` explícito, prontos pra implementar
+de verdade se o host mudar.
+
+**`podman-machine` funciona** porque sobe uma VM **real** (QEMU acelerado
+por KVM -- `/dev/kvm` confirmado disponível) com um kernel Fedora CoreOS
+de verdade: `/lib/modules` clássico existe lá dentro, e o container
+runtime da VM não tem o problema de path do host. Dentro dessa VM
+instalamos **k3s nativamente** (não mais um container aninhado) -- um
+único binário com containerd embutido e o controlador de NetworkPolicy
+do kube-router habilitado por padrão.
+
+Pré-requisito descoberto ao vivo (não documentado antes de tentar): a
+imagem do `podman machine` desta versão empacotada pelo Nix (5.8.6) não
+traz `qemu-img`/`qemu-system-x86_64`, `gvproxy` nem `virtiofsd`
+embutidos -- `podman machine start` falha com erro explícito pra cada um
+(`could not find "gvproxy"...`, `failed to find virtiofsd`). Resolvido
+via `nix build nixpkgs#<pkg> --no-link --print-out-paths` (rápido,
+cacheado) escrevendo `~/.config/containers/containers.conf` com
+`helper_binaries_dir` apontando pros três -- `smoke/engines/podman_machine.py`
+faz isso sozinho a cada `up()` (idempotente).
+
+Fluxo completo de `up()`: cria/inicia a VM -> instala k3s via SSH se
+ainda não instalado (`get.k3s.io`, `--disable traefik --disable
+servicelb`) -> espera o node ficar Ready -> busca o kubeconfig de dentro
+da VM e reescreve `server:` pra um túnel SSH local
+(`ssh -L 16443:127.0.0.1:6443 ...`) mantido em background -> devolve um
+`ClusterHandle` usável IMEDIATAMENTE por `kubectl`/client Python
+`kubernetes` rodando no host -- confirmado ao vivo que `exec` (usado por
+`chp_client.py`/`session_client.py`) e `kubectl port-forward` (usado no
+passo final do smoke-test) funcionam através desse túnel exatamente como
+contra o cluster real.
+
+`down()` por padrão remove a VM inteira (`podman machine rm -f`) --
+efêmero de verdade, confirmado ao vivo (kubeconfig e VM somem depois).
+`KREWHUB_SMOKE_KEEP_MACHINE=1` pula a remoção (só para a VM) pra iteração
+rápida repetida sem pagar de novo o custo de instalar k3s (~2-3min) --
+**cuidado**: rodar `up()` de novo rápido demais depois de um `down()`
+sem essa flag pode colidir com namespaces ainda em `Terminating` da
+rodada anterior (visto ao vivo uma vez) -- não é um bug de idempotência
+do reconcile, é só o k3s ainda finalizando a exclusão; espera alguns
+segundos ou usa `KREWHUB_SMOKE_KEEP_MACHINE=1` entre execuções rápidas.
+
+### `smoke/engines/external.py` -- fallback manual
+
+Não sobe nada -- aponta pra um kubeconfig/contexto já existente via
+`KREWHUB_SMOKE_EXTERNAL_KUBECONFIG`/`KREWHUB_SMOKE_EXTERNAL_CONTEXT`
+(sem default de contexto -- não assume qual usar). Útil pra apontar pra
+um namespace descartável dentro de um cluster real (inclusive o próprio
+`galaxy-far-far-away`) se nenhum engine efêmero estiver disponível.
+`down()` é sempre no-op -- este engine nunca destrói um cluster que não
+criou.
+
+### `smoke/fake_kirocrew/` -- por que não usar a imagem real
+
+A imagem real (`ghcr.io/kirodotdev/kirocrew`) é pesada, licenciada, e
+exige um humano completando um device-flow no navegador (`kiro-cli
+login`) -- inviável pra um smoke-test automatizado. `fake_kirocrew/` é
+um servidor HTTP mínimo (só stdlib Python) que serve `/api/health`,
+`/api/ready`, `/api/live` e uma `/` reconhecível, mais um `kirocrew`
+(CLI fake) que reproduz o formato de saída exato que
+`session_client.py` já sabe parsear (`token --ttl` imprime uma URL com
+`?token=`, `logout` imprime `✅`). Não reimplementa nada de
+auth/sandbox real -- só o suficiente pra provar que o reconcile do
+KrewHub, o roteamento do CHP e a emissão/revogação de sessão funcionam
+de ponta a ponta.
+
+`PodmanMachineEngine.load_image()` builda essa imagem DENTRO da VM (que
+já tem podman, Fedora CoreOS) e importa o resultado no containerd
+embutido do k3s via `ctr images import` -- sem precisar de nenhum
+registry externo.
+
+### Rodado ao vivo, com sucesso, ciclo completo
+
+```
+[1/8] engine.up() (podman-machine) ...
+[2/8] aplicando manifests.yaml (namespaces + CHP) ...
+[3/8] load_image(fake-kirocrew) ...
+[4/8] subindo krewhub-central local, apontado pro cluster efêmero ...
+[5/8] provision (reconcile + CHP route + token de sessão) ...
+      provision ok: steps={'namespace': 'exists', 'secret': 'created',
+      'configmap': 'created', 'pvc': 'created', 'service': 'created',
+      'networkpolicy': 'created', 'deployment': 'created'}
+      route={'host': 'smoke-test-krewhub-local-test.smoke.internal', ...,
+      'status': 201}
+[6/8] port-forward pro Service do CHP + acesso real ao dashboard fake ...
+      200 OK através do CHP, HTML do fake-kirocrew confirmado
+[7/8] close (revoga sessão do kirocrew) + logout (limpa cookie do KrewHub) ...
+
+✅ SMOKE-TEST PASSOU -- todos os passos: ['engine_up', 'chp_ready',
+'fake_image_loaded', 'krewhub_central_up', 'provision',
+'dashboard_via_chp', 'close', 'logout']
+[8/8] cleanup ...
+```
+
+Ciclo completo (VM do zero -> k3s instalado -> fluxo inteiro -> VM
+removida) rodado ao vivo em ~4m30s. Confirmado ao final: `podman machine
+list` vazio, `/tmp/krewhub-smoke-kubeconfig.yaml` removido -- nada ficou
+pra trás.
+
+### O que falta pros outros engines
+
+`kind`/`k3d`: só voltam a ser viáveis se o host mudar (kernel com
+`/lib/modules` clássico, ou as ferramentas ganharem suporte a path de
+socket customizável) -- os stubs já estão prontos, só falta implementar
+`up()`/`down()`/`load_image()` de verdade quando isso deixar de ser um
+bloqueio. `external`: já funcional como fallback manual, mas nunca
+testado ao vivo nesta fatia (não havia necessidade -- `podman-machine`
+funcionou de primeira depois de resolvido o `helper_binaries_dir`).
+
 ## Fora de escopo desta fatia (não são bloqueios, são a próxima fatia)
 
 - Culling por inatividade (prioridade sobe -- ver achado de contenção de
@@ -1203,3 +1421,9 @@ de aplicar sem uma decisão explícita.
   registrados explicitamente (`GET /devs` deixado aberto por decisão,
   `GET /devs/{owner_id}` e `GET /devs/{owner_id}/open` ainda não
   cobertos).
+- ~~Smoke-test em cluster efêmero~~ -- **fechada nesta fatia**: engine
+  plugável (`smoke/engines/`), `podman-machine` funcional (único viável
+  neste host -- kind/k3d documentados como bloqueados por paredes
+  estruturais do host, não como bug), ciclo completo rodado ao vivo com
+  sucesso (provision -> CHP -> dashboard fake -> close -> logout ->
+  cleanup) -- ver seção "Smoke-test em cluster efêmero" acima.

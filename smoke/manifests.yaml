@@ -1,0 +1,121 @@
+# Manifests mínimos pro smoke-test em cluster efêmero: os dois
+# namespaces + o CHP (mesma imagem/flags do GitOps real,
+# clusters/family-cluster/kirohub/chp/*.yaml) -- NÃO é o mesmo arquivo
+# (evita acoplar o smoke-test ao layout do repo GitOps), mas é
+# conceitualmente idêntico. `krewhub-central` NÃO é deployado aqui como
+# pod -- roda como processo local (mesmo modo "Rodando local" já
+# documentado no README principal), apontando pro kubeconfig do cluster
+# efêmero; mais rápido de iterar e exercita exatamente o mesmo código.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kirohub
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: krewhub-devs
+  labels:
+    krewhub.pespa.net/managed-by: krewhub-central
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: chp-admin-token
+  namespace: kirohub
+type: Opaque
+stringData:
+  token: "smoke-test-only-placeholder-token"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: configurable-http-proxy
+  namespace: kirohub
+  labels:
+    app: configurable-http-proxy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: configurable-http-proxy
+  template:
+    metadata:
+      labels:
+        app: configurable-http-proxy
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: configurable-http-proxy
+          image: docker.io/jupyterhub/configurable-http-proxy:5.3.0
+          command:
+            - configurable-http-proxy
+            - --ip
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --api-ip
+            - "127.0.0.1"
+            - --api-port
+            - "8001"
+            - --host-routing
+            - --log-level
+            - info
+          env:
+            - name: CONFIGPROXY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chp-admin-token
+                  key: token
+          ports:
+            - containerPort: 8000
+              name: public
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 20
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: configurable-http-proxy
+  namespace: kirohub
+spec:
+  type: ClusterIP
+  selector:
+    app: configurable-http-proxy
+  ports:
+    - name: public
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
