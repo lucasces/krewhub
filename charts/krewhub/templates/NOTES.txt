@@ -1,0 +1,30 @@
+KrewHub central{{ if .Values.chp.enabled }} + configurable-http-proxy{{ end }} instalado em {{ .Release.Namespace }} (release {{ .Release.Name }}).
+
+Lembrete -- este chart NÃO cria/gera nenhum Secret. Os campos abaixo
+(`existingSecretName`) guardam só o NOME de um `Secret` do Kubernetes
+que precisa já existir no cluster -- NUNCA o valor do token/segredo em
+si (esse valor nunca passa por `values.yaml` nem por este chart). São
+sua responsabilidade, criados por fora deste chart, antes do
+install/upgrade:
+  {{- if .Values.chp.enabled }}
+  - {{ .Values.chp.adminToken.existingSecretName }} (chave: {{ .Values.chp.adminToken.key }}) -- OBRIGATÓRIO, o CHP não sobe sem isso.
+  {{- end }}
+  {{- if .Values.krewhubCentral.oidc.existingSecretName }}
+  - {{ .Values.krewhubCentral.oidc.existingSecretName }} (chaves: {{ .Values.krewhubCentral.oidc.issuerKey }}, {{ .Values.krewhubCentral.oidc.clientIdKey }}, {{ .Values.krewhubCentral.oidc.clientSecretKey }}, {{ .Values.krewhubCentral.oidc.redirectUriKey }}, {{ .Values.krewhubCentral.oidc.sessionSecretKey }})
+  {{- else }}
+  - (OIDC não configurado -- krewhubCentral.oidc.existingSecretName vazio: o krewhub-central sobe normalmente, mas /login e os endpoints de sessão própria ficam indisponíveis até você configurar esse Secret e fazer upgrade)
+  {{- end }}
+  {{- if .Values.krewhubCentral.imagePullSecretName }}
+  - {{ .Values.krewhubCentral.imagePullSecretName }} (docker-registry)
+  {{- end }}
+
+Os pods POR DEV (kirocrew-<slug>, namespace {{ .Values.devNamespace.name }})
+NÃO fazem parte deste chart -- são criados dinamicamente pelo próprio
+krewhub-central via API do k8s. `helm uninstall` NUNCA remove esses
+pods; gerencie-os via a própria API do krewhub-central.
+
+Acesso (sem Ingress controller assumido por este chart):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/krewhub-central {{ .Values.krewhubCentral.service.port }}:{{ .Values.krewhubCentral.service.port }}
+  {{- if .Values.chp.enabled }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/configurable-http-proxy 8080:{{ .Values.chp.service.port }}
+  {{- end }}

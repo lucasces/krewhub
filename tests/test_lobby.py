@@ -49,7 +49,7 @@ def mocked_infra(monkeypatch, settings):
     monkeypatch.setattr(
         session_client,
         "issue_token_url",
-        lambda _c, *, namespace, slug, host, public_port, ttl="24h": f"http://{host}:{public_port}/?token=tok-{slug}",
+        lambda _c, *, namespace, slug, host, public_port, scheme="http", ttl="24h": f"{scheme}://{host}:{public_port}/?token=tok-{slug}",
     )
     monkeypatch.setattr(kiro_login, "start_device_flow", _kiro_login)
     return calls

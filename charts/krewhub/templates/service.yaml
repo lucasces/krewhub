@@ -1,0 +1,21 @@
+# ClusterIP simples -- alcançável de dentro do cluster (inclusive pelo
+# CHP, que roteia pra cá via a rota auto-registrada no startup). Acesso
+# de fora do cluster continua via port-forward (neste Service ou no do
+# CHP) -- não há Ingress controller neste cluster hoje.
+apiVersion: v1
+kind: Service
+metadata:
+  name: krewhub-central
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+    {{- include "krewhubCentral.selectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "krewhubCentral.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.krewhubCentral.service.port }}
+      targetPort: 8080
+      protocol: TCP

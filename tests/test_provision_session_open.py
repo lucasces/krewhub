@@ -54,9 +54,9 @@ def mocked_infra(monkeypatch, settings):
         calls["register_route"] += 1
         return {"host": host, "target": target, "status": 201}
 
-    def _issue_token_url(_c, *, namespace, slug, host, public_port, ttl="24h"):
+    def _issue_token_url(_c, *, namespace, slug, host, public_port, scheme="http", ttl="24h"):
         calls["issue_token"] += 1
-        return f"http://{host}:{public_port}/?token=fake-token-for-{slug}"
+        return f"{scheme}://{host}:{public_port}/?token=fake-token-for-{slug}"
 
     monkeypatch.setattr(k8s_manager, "reconcile_dev", _reconcile_counted)
     monkeypatch.setattr(k8s_manager, "get_clients", lambda _settings: mock.Mock())

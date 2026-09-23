@@ -41,7 +41,16 @@ def _find_kirocrew_pod(c: Clients, namespace: str, slug: str) -> str:
     return running[0].metadata.name
 
 
-def issue_token_url(c: Clients, *, namespace: str, slug: str, host: str, public_port: str, ttl: str = "24h") -> str:
+def issue_token_url(
+    c: Clients,
+    *,
+    namespace: str,
+    slug: str,
+    host: str,
+    public_port: str,
+    scheme: str = "http",
+    ttl: str = "24h",
+) -> str:
     """Roda `kirocrew token --ttl {ttl}` dentro do pod e devolve a URL
     pública correta (host/porta do CHP, não `localhost:5476` interno que
     o comando imprime por padrão -- só o `?token=...` é reaproveitado)."""
@@ -66,7 +75,7 @@ def issue_token_url(c: Clients, *, namespace: str, slug: str, host: str, public_
     if not token:
         raise SessionError(f"URL sem query param 'token': {internal_url!r}")
 
-    return f"http://{host}:{public_port}/?token={urllib.parse.quote(token[0], safe='')}"
+    return f"{scheme}://{host}:{public_port}/?token={urllib.parse.quote(token[0], safe='')}"
 
 
 def revoke_session(c: Clients, *, namespace: str, slug: str) -> str:

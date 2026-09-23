@@ -1,0 +1,59 @@
+apiVersion: v2
+name: krewhub
+description: >-
+  KrewHub central (reconcile idempotente de pods-por-dev do Kiro Crew via
+  API do k8s) + configurable-http-proxy (CHP, roteamento por Host). Chart
+  cobre só a infraestrutura ESTÁTICA (o hub em si) -- os recursos
+  por-dev (namespace krewhub-devs, pods kirocrew-<slug>) são criados
+  dinamicamente pelo próprio krewhub-central via client Python
+  `kubernetes`, fora do lifecycle deste chart -- ver README (seção
+  "Empacotamento Helm") pro porquê exato dessa fronteira.
+type: application
+
+# Versão do CHART -- incrementar a cada mudança de template/values,
+# independente da versão do app (ver appVersion abaixo). SemVer.
+#
+# 0.1.3: expõe via values.yaml (krewhubCentral.devPodTemplate.scheme,
+# KREWHUB_DEV_POD_SCHEME) o scheme público dos pods-por-dev, ao lado de
+# publicPort -- mudança 100% aditiva, default vazio ("") não emite o env
+# var novo, e o default do CÓDIGO ("http") reproduz bit-a-bit o manifest
+# gerado antes desta versão (ver README/testes em app/k8s_templates.py).
+# Necessário pra clusters onde TLS termina na borda (Ingress/ALB) e o
+# backend interno é HTTP puro -- sem isso, KIROCREW_CORS_ORIGINS/
+# dashboard_url_with_token saem "http://..." e nunca batem com o Origin
+# real "https://..." que o browser manda (403 CSRF mesmo com host/porta
+# corretos).
+#
+# 0.1.2: expõe via values.yaml (chp.affinity/chp.nodeSelector/
+# chp.tolerations) o mesmo passthrough genérico de scheduling que já
+# existia pro krewhub-central, agora também pro Deployment do CHP
+# (templates/chp-deployment.yaml) -- antes o CHP não tinha NENHUM campo
+# de scheduling exposto; num cluster com nodes taintados NoSchedule (ex.
+# EKS com nodepools dedicados por workload) o pod do CHP fica Pending
+# pra sempre e, sem CHP, não há host-routing (instalação inteira não
+# sobe). Defaults vazios ({}/{}/[]) -- mudança 100% aditiva, sem alterar
+# nenhum default nem o manifest gerado pro homelab (ver README).
+#
+# 0.1.1: expõe via values.yaml (krewhubCentral.devPodTemplate.*,
+# krewhubCentral.devPodOverlay) as settings do template pod-por-dev que
+# antes só existiam como default hardcoded em app/config.py
+# (storageClass/storageSize/baseDomain/kirocrewImage/chpNamespace/
+# chpAdminPort/publicPort) + o mecanismo de overlay JSON Patch
+# (app/overlay.py) via ConfigMap opcional -- mudança 100% aditiva, sem
+# alterar nenhum default nem o manifest gerado pro homelab (ver README).
+version: 0.1.3
+
+# Versão do APP mostrada em `helm list`/labels -- reflete a tag da imagem
+# default em values.yaml (krewhubCentral.image.tag). Atualizar junto se
+# o default mudar; não é usado por nenhum template (o tag efetivo vem de
+# .Values.krewhubCentral.image.tag, nunca de .Chart.AppVersion).
+#
+# Bump pra sha-91a483d (era sha-e006f15): a imagem default ANTERIOR não
+# continha app/overlay.py nem o mecanismo de overlay JSON Patch (commit
+# 91a483d, o mais recente em HEAD) -- sem este bump, ligar
+# krewhubCentral.devPodOverlay contra a imagem default antiga faria o
+# krewhub-central quebrar no boot (ImportError). sha-91a483d já estava
+# publicado no GHCR e rodando ao vivo no homelab (kirohub/krewhub-central)
+# antes deste bump -- não foi necessário rebuild, só apontar o chart pra
+# ela (ver README).
+appVersion: "sha-91a483d"

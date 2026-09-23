@@ -1,0 +1,24 @@
+{{- if .Values.krewhubCentral.devPodOverlay }}
+# Overlay JSON Patch (RFC 6902) por-cluster aplicado pelo krewhub-central
+# em cima dos manifests genéricos que app/k8s_templates.py gera pra CADA
+# pod-por-dev (ver app/overlay.py no repo krewhub -- mecanismo que
+# substituiu o nodeAffinity hardcoded que existia antes). Documento
+# {recurso: [operações]}, uma chave por build_* que suporta overlay hoje
+# (deployment, pvc) -- ver krewhubCentral.devPodOverlay em values.yaml
+# pro formato exato e um exemplo genérico.
+#
+# Só existe (este ConfigMap todo é omitido, default) se
+# krewhubCentral.devPodOverlay vier preenchido -- ver
+# KREWHUB_DEV_POD_OVERLAY_PATH em templates/deployment.yaml, que monta
+# este ConfigMap e aponta pra ele.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: krewhub-dev-pod-overlay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+data:
+  dev-pod-overlay.yaml: |
+    {{- toYaml .Values.krewhubCentral.devPodOverlay | nindent 4 }}
+{{- end }}

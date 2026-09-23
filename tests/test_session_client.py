@@ -77,6 +77,51 @@ def test_issue_token_url_rewrites_internal_url_to_public_host(monkeypatch, fake_
     assert captured["command"] == ["kirocrew", "token", "--ttl", "30m"]
 
 
+def test_issue_token_url_default_scheme_is_http_unchanged(monkeypatch, fake_clients):
+    """Sem `scheme=` explicito (comportamento pre-existente, chamado sem
+    esse kwarg), tem que continuar gerando http:// -- sem regressao pro
+    homelab, que nunca passa scheme nenhum."""
+    fake_clients.core.list_namespaced_pod.return_value = mock.Mock(
+        items=[_pod("kirocrew-dev-a-abc")]
+    )
+    monkeypatch.setattr(
+        session_client,
+        "stream",
+        lambda *a, **kw: "http://localhost:5476?token=THE-TOKEN-VALUE\n",
+    )
+    url = session_client.issue_token_url(
+        fake_clients,
+        namespace="krewhub-devs",
+        slug="dev-a-test-local",
+        host="dev-a-test-local.kiro.internal",
+        public_port="8080",
+    )
+    assert url == "http://dev-a-test-local.kiro.internal:8080/?token=THE-TOKEN-VALUE"
+
+
+def test_issue_token_url_https_scheme_when_tls_terminates_at_the_edge(monkeypatch, fake_clients):
+    """TLS termina na borda (Ingress/ALB) -- dashboard_url_with_token
+    precisa vir com https:// (mesmo achado do KIROCREW_CORS_ORIGINS:
+    scheme errado quebra o link/CSRF mesmo com host/porta certos)."""
+    fake_clients.core.list_namespaced_pod.return_value = mock.Mock(
+        items=[_pod("kirocrew-dev-a-abc")]
+    )
+    monkeypatch.setattr(
+        session_client,
+        "stream",
+        lambda *a, **kw: "http://localhost:5476?token=THE-TOKEN-VALUE\n",
+    )
+    url = session_client.issue_token_url(
+        fake_clients,
+        namespace="krewhub-devs",
+        slug="dev-a-test-local",
+        host="dev-a-test-local.kiro.s.somosdigital.io",
+        public_port="443",
+        scheme="https",
+    )
+    assert url == "https://dev-a-test-local.kiro.s.somosdigital.io:443/?token=THE-TOKEN-VALUE"
+
+
 def test_issue_token_url_raises_when_no_token_in_output(monkeypatch, fake_clients):
     fake_clients.core.list_namespaced_pod.return_value = mock.Mock(
         items=[_pod("kirocrew-dev-a-abc")]

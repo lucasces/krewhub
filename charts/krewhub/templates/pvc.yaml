@@ -1,0 +1,24 @@
+# Persiste o SQLite (owner_id -> {namespace, host, status, login_mode,
+# last_token_issued_at}) através de restarts do pod -- sem isso, cada
+# restart/redeploy esqueceria quem já foi provisionado.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.krewhubCentral.persistence.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.krewhubCentral.persistence.storageClassName }}
+  # Só presente se explicitamente setado -- ausente (default), usa a
+  # StorageClass DEFAULT do cluster (comportamento correto/genérico;
+  # setar "" explicitamente aqui SIGNIFICARIA "sem StorageClass
+  # nenhuma", diferente de omitir o campo -- por isso o `with`, não uma
+  # comparação com string vazia).
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.krewhubCentral.persistence.size }}

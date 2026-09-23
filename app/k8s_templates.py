@@ -20,16 +20,25 @@ depende dessa label, não mais da fronteira do namespace -- ver
 build_networkpolicy).
 
 Toda decisão já validada ao vivo nas fatias anteriores está preservada
-aqui: nodeAffinity control-plane (CSI cephfs só roda lá), seccompProfile
-Unconfined só no container kirocrew (sandbox unshare), fsGroup 1000 (PVC
-root-owned), NetworkPolicy só liberando o CHP pra porta 5476, KIROCREW_CORS_ORIGINS
-apontando pro host do dev (Host-header allowlist do dashboard)."""
+aqui: seccompProfile Unconfined só no container kirocrew (sandbox
+unshare), fsGroup 1000 (PVC root-owned), NetworkPolicy só liberando o CHP
+pra porta 5476, KIROCREW_CORS_ORIGINS apontando pro host do dev
+(Host-header allowlist do dashboard).
+
+O que NÃO está mais fixo aqui (achado de investigação anterior: estava
+hardcoded sem via de configuração nenhuma) é o nodeAffinity pro node
+control-plane que o CSI do rook-cephfs deste cluster exige -- isso agora
+é responsabilidade do overlay JSON Patch (ver app/overlay.py e
+KREWHUB_DEV_POD_OVERLAY_PATH/_JSON no README): sem overlay configurado,
+build_deployment/build_pvc geram manifest 100% genérico, sem nada
+específico de cluster nenhum -- rodam em qualquer cluster k8s."""
 
 from __future__ import annotations
 
 import re
 
 from app.config import Settings
+from app.overlay import apply_overlay, load_overlay_ops
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -37,6 +46,11 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # -- é o que garante que a NetworkPolicy de um dev não vaze pro pod de
 # outro dev no mesmo namespace (ver build_networkpolicy/build_deployment).
 OWNER_LABEL_KEY = "krewhub.pespa.net/owner-slug"
+
+# Porta padrao de cada scheme -- usado pra decidir quando OMITIR a porta
+# de KIROCREW_CORS_ORIGINS (ver build_configmap). O browser nunca inclui
+# a porta padrao do scheme atual no header Origin.
+_DEFAULT_PORT_FOR_SCHEME = {"http": "80", "https": "443"}
 
 
 def slugify(owner_id: str, *, max_len: int = 40) -> str:
@@ -92,13 +106,35 @@ def build_configmap(namespace: str, slug: str, host: str, settings: Settings) ->
             # login): sem isso, todo Host != localhost/127.0.0.1 recebe
             # 403 "Host header not allowed." em qualquer rota fora dos
             # health probes.
-            "KIROCREW_CORS_ORIGINS": f"http://{host}:{settings.public_port}",
+            #
+            # Porta padrao do scheme (80 pra http, unico scheme usado
+            # aqui) precisa ser OMITIDA -- o browser nunca inclui a
+            # porta padrao no header Origin, e o CSRF-origin check da
+            # lib vendored (kiro_crew/dashboard/origin.py::check_origin)
+            # faz match EXATO de string "scheme://host:port" contra esse
+            # valor (diferente do Host-header check, que so compara
+            # hostname e por isso nao pegou esse bug antes). Um valor
+            # com ":80" explicito nunca bate com o Origin real do
+            # browser -- achado real, 403 "CSRF check failed" no fluxo
+            # de import do Kiro Crew.
+            # Scheme tambem precisa ser configuravel (KREWHUB_DEV_POD_SCHEME,
+            # settings.dev_pod_scheme): quando TLS termina na borda
+            # (Ingress/ALB) e o backend interno e HTTP puro, o browser manda
+            # Origin com "https://" mesmo que o Service seja HTTP -- um
+            # scheme "http://" hardcoded aqui nunca bateria com esse Origin
+            # real, mesmo com a porta certa. A porta padrao omitida tambem
+            # depende do scheme (80 pra http, 443 pra https).
+            "KIROCREW_CORS_ORIGINS": (
+                f"{settings.dev_pod_scheme}://{host}"
+                if settings.public_port == _DEFAULT_PORT_FOR_SCHEME.get(settings.dev_pod_scheme, "80")
+                else f"{settings.dev_pod_scheme}://{host}:{settings.public_port}"
+            ),
         },
     }
 
 
 def build_pvc(namespace: str, slug: str, settings: Settings) -> dict:
-    return {
+    manifest = {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
         "metadata": {"name": f"kiro-workspace-{slug}", "namespace": namespace},
@@ -108,6 +144,12 @@ def build_pvc(namespace: str, slug: str, settings: Settings) -> dict:
             "resources": {"requests": {"storage": settings.storage_size}},
         },
     }
+    # PVC spec é majoritariamente imutável após a criação (só
+    # resources.requests.storage pode crescer) -- um overlay que mude
+    # storageClassName/accessModes só pega em PVCs criados DEPOIS da
+    # mudança; num PVC já existente o apiserver rejeita o patch (422),
+    # comportamento nativo do k8s, não deste mecanismo.
+    return apply_overlay(manifest, load_overlay_ops(settings, "pvc"))
 
 
 def build_service(namespace: str, slug: str) -> dict:
@@ -172,7 +214,7 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
 
 def build_deployment(namespace: str, slug: str, settings: Settings) -> dict:
     pod_labels = {"app": "kirocrew", OWNER_LABEL_KEY: slug}
-    return {
+    manifest = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {
@@ -191,22 +233,13 @@ def build_deployment(namespace: str, slug: str, settings: Settings) -> dict:
                         "fsGroup": 1000,
                         "seccompProfile": {"type": "RuntimeDefault"},
                     },
-                    "affinity": {
-                        "nodeAffinity": {
-                            "requiredDuringSchedulingIgnoredDuringExecution": {
-                                "nodeSelectorTerms": [
-                                    {
-                                        "matchExpressions": [
-                                            {
-                                                "key": "node-role.kubernetes.io/control-plane",
-                                                "operator": "Exists",
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        }
-                    },
+                    # Sem "affinity" aqui de propósito -- nenhuma restrição
+                    # de nó genérica faz sentido pra QUALQUER cluster.
+                    # Se o cluster precisar de uma (ex.: nodeAffinity pro
+                    # control-plane, exigido pelo CSI do rook-cephfs no
+                    # galaxy-far-far-away), isso entra via overlay JSON
+                    # Patch (ver app/overlay.py, aplicado no fim desta
+                    # função) -- nunca hardcoded aqui.
                     "containers": [
                         {
                             "name": "kirocrew",
@@ -276,3 +309,4 @@ def build_deployment(namespace: str, slug: str, settings: Settings) -> dict:
             },
         },
     }
+    return apply_overlay(manifest, load_overlay_ops(settings, "deployment"))

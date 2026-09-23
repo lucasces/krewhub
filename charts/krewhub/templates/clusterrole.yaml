@@ -1,0 +1,61 @@
+{{- if .Values.krewhubCentral.rbac.create }}
+# RBAC mínimo -- só os recursos que
+# app/k8s_manager.py/app/k8s_templates.py (código-fonte do
+# krewhub-central) de fato manipulam hoje, não uma lista aspiracional.
+# ClusterRole (não Role) porque
+# `devNamespace.name` é configurável -- não escopamos um Role fixo pra
+# um nome de namespace específico.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # Nome fixo (não sufixado por release) -- ClusterRole é cluster-scoped;
+  # instalar duas releases deste chart no mesmo cluster colidiria aqui de
+  # propósito (só deveria existir um krewhub-central por cluster hoje).
+  name: krewhub-central
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+rules:
+  # Namespace compartilhado de dev -- só leitura/confirmação
+  # (k8s_manager.ensure_dev_namespace faz um read_namespace; ele já
+  # existe via o template dev-namespace.yaml deste chart). SEM
+  # create/patch/update -- não é mais necessário (mesmo achado já
+  # documentado no GitOps).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Secret (kiro-owner-id-<slug>), ConfigMap (kiro-config-<slug>),
+  # Service (kirocrew-<slug>), PVC (kiro-workspace-<slug>) -- todos
+  # namespaced, criados/atualizados dentro do namespace compartilhado,
+  # um conjunto por slug de dev.
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  # Pods -- list (achar o pod kirocrew/CHP por label selector) e o
+  # subrecurso exec (rodar `kirocrew token`, `kiro-cli login`, curl na
+  # API admin do CHP).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # get, não create: o client python (connect_get_namespaced_pod_exec)
+  # emite a requisição como HTTP GET com upgrade pra websocket -- o
+  # apiserver checa RBAC contra o verbo HTTP real, não contra a
+  # convenção usual de "create" documentada pro kubectl exec (achado ao
+  # vivo, documentado no README do krewhub).
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  # Deployment (kirocrew-<slug>) -- create/patch + status
+  # (k8s_manager.wait_for_ready lê status via
+  # read_namespaced_deployment_status).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/status"]
+    verbs: ["get"]
+  # NetworkPolicy (allow-chp-to-dashboard-only-<slug>, uma por dev, com
+  # podSelector único -- crítico com o namespace compartilhado).
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+{{- end }}

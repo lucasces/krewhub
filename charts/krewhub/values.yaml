@@ -1,0 +1,258 @@
+# Valores default -- pensados pra rodar em QUALQUER cluster Kubernetes
+# genérico (não hardcoda StorageClass, domínio, topologia de nó nem
+# mecanismo de secret de nenhum ambiente específico). Onde o SEU cluster
+# precisar de um valor particular (uma StorageClass específica, um
+# domínio de proxy, uma restrição de topologia de nó), isso fica como
+# override explícito, nunca como default -- setar isso é
+# responsabilidade de quem instala o chart naquele cluster específico,
+# via `--set`/values override próprio (documentado como exemplo genérico
+# nos comentários abaixo, sem citar nenhum ambiente real específico).
+#
+# Gestão de Secret também é responsabilidade de quem instala: este
+# chart NUNCA cria/gera nenhum Secret (nem placeholder) -- só referencia
+# por nome/chave um Secret que já precisa existir. Onde isso é
+# indispensável pro componente sequer subir (o token de admin do CHP),
+# o template falha explicitamente em `helm template`/`helm install` se
+# o nome não vier setado (`required`), em vez de renderizar um manifest
+# quebrado silenciosamente. Onde o app tolera a ausência em runtime
+# (OIDC -- `krewhub-central` sobe normal e só a rota `/login` responde
+# 501 até isso ser configurado, comportamento já nativo do app), o chart
+# só documenta como pré-requisito funcional e pula os env vars por
+# inteiro se o nome não vier setado -- nunca falha o template por causa
+# disso. Ver README, seção "Empacotamento Helm", pra essa decisão.
+
+# Namespace COMPARTILHADO onde TODOS os pods de dev (kirocrew-<slug>)
+# vivem -- criado aqui DECLARATIVAMENTE (o reconcile do krewhub-central
+# só CONFIRMA que existe, nunca cria/edita Namespace -- ver ClusterRole
+# abaixo, sem create/patch/update em "namespaces"). Fora do lifecycle
+# "por-dev" -- é infra estática do hub, não um recurso descartável por
+# dev. O NOME é só uma convenção do próprio app (não é específico de
+# nenhum cluster) -- pode trocar livremente.
+devNamespace:
+  create: true
+  name: krewhub-devs
+
+krewhubCentral:
+  replicaCount: 1
+
+  image:
+    repository: ghcr.io/lucasces/krewhub-central
+    # sha-91a483d -- inclui app/overlay.py (mecanismo de overlay JSON
+    # Patch, ver krewhubCentral.devPodOverlay abaixo), ausente em tags
+    # anteriores. Ver Chart.yaml (appVersion) pro porquê do bump.
+    tag: sha-91a483d
+    pullPolicy: IfNotPresent
+
+  # Nome de um Secret docker-registry JÁ EXISTENTE (criado por fora
+  # deste chart -- é uma credencial real). "" (default) = nenhum
+  # imagePullSecret referenciado (assume imagem pública/acessível sem
+  # credencial).
+  imagePullSecretName: ""
+
+  serviceAccount:
+    create: true
+    name: krewhub-central
+
+  # RBAC mínimo (ClusterRole/ClusterRoleBinding) -- só os recursos que
+  # app/k8s_manager.py de fato manipula hoje (ver comentário em cada
+  # regra no template). Desligar só faz sentido se o RBAC for gerenciado
+  # por fora do chart.
+  rbac:
+    create: true
+
+  # PVC do SQLite (owner_id -> {namespace, host, status, ...}) --
+  # sobrevive a restart do pod, diferente do default `./krewhub.db`
+  # (filesystem efêmero do container).
+  persistence:
+    name: krewhub-central-data
+    # "" (default) = SEM `storageClassName` no manifest -> usa a
+    # StorageClass DEFAULT do cluster (anotada
+    # storageclass.kubernetes.io/is-default-class), o comportamento
+    # genérico correto pra "qualquer cluster". Setar explicitamente só
+    # se o SEU cluster exigir uma StorageClass específica -- ex.:
+    # storageClassName: minha-storage-class
+    storageClassName: ""
+    size: 1Gi
+
+  service:
+    port: 8080
+
+  # Nome de um Secret JÁ EXISTENTE (aplicado por fora deste chart --
+  # nunca criado por ele) com as chaves abaixo, usado pelas env vars
+  # KREWHUB_OIDC_*/KREWHUB_SESSION_SECRET. "" (default) = os 5 env vars
+  # OIDC/sessão NÃO são adicionados ao Deployment -- o krewhub-central
+  # sobe normalmente mesmo assim (comportamento nativo do app: `/login`
+  # responde 501 explicando a config ausente; endpoints que dependem de
+  # sessão própria -- provision/session/lobby/close/logout -- também
+  # ficam indisponíveis até isso ser configurado). Configure este Secret
+  # ANTES de tentar usar o fluxo de login de verdade -- não há
+  # comportamento "funcional por padrão" possível aqui sem inventar um
+  # segredo, o que este chart deliberadamente não faz.
+  oidc:
+    existingSecretName: ""
+    issuerKey: issuer
+    clientIdKey: client-id
+    clientSecretKey: client-secret
+    redirectUriKey: redirect-uri
+    sessionSecretKey: session-secret
+
+  # Auto-registra a própria rota num configurable-http-proxy (CHP,
+  # host-routing) no startup (app/main.py::_self_register_route) -- só
+  # faz sentido se INCLUIR um CHP alcançável (`chp.enabled: true` neste
+  # mesmo chart, ou outro já existente no cluster/namespace). "" (default)
+  # = pula o auto-registro por completo (nenhum domínio é assumido).
+  # Exemplo genérico:
+  # selfHost: krewhub.seu-dominio.example
+  selfHost: ""
+  selfPort: 8080
+
+  dbPath: /data/krewhub.db
+
+  # --- Template do pod-por-dev (kirocrew-<slug>) -- passthrough genérico
+  # pras env vars que app/config.py já lê (consumidas por
+  # app/k8s_templates.py) pra gerar o Deployment/PVC/NetworkPolicy de
+  # CADA dev. "" (default, omitido) em qualquer campo abaixo = a env
+  # var correspondente NEM é adicionada ao Deployment do
+  # krewhub-central -- o app cai no default de app/config.py (hoje:
+  # rook-cephfs, kiro.internal, ghcr.io/kirodotdev/kirocrew:0.6.0,
+  # "kirohub" pro CHP -- todos valores REVISÁVEIS do homelab, nunca
+  # hardcoded aqui no chart). Preencha só o que o SEU cluster precisar
+  # (ex., numa EKS: storageClass: gp3, baseDomain: seu.dominio.example).
+  devPodTemplate:
+    # StorageClass do PVC de workspace de cada pod-por-dev
+    # (KREWHUB_STORAGE_CLASS, default do código: rook-cephfs).
+    storageClass: ""
+    # Tamanho do PVC de workspace de cada pod-por-dev
+    # (KREWHUB_STORAGE_SIZE, default do código: 10Gi).
+    storageSize: ""
+    # Domínio base do host-routing por-dev, <slug>.<baseDomain>
+    # (KREWHUB_BASE_DOMAIN, default do código: kiro.internal).
+    baseDomain: ""
+    # Imagem do container kirocrew que cada pod-por-dev roda
+    # (KREWHUB_KIROCREW_IMAGE, default do código:
+    # ghcr.io/kirodotdev/kirocrew:0.6.0). Necessário pra uma imagem
+    # customizada do gateway numa próxima fatia.
+    kirocrewImage: ""
+    # Porta pública em que o KREWHUB (não o pod-por-dev) é alcançado --
+    # entra no KIROCREW_CORS_ORIGINS de cada pod-por-dev
+    # (KREWHUB_PUBLIC_PORT, default do código: 8080).
+    publicPort: ""
+    # Scheme público dos pods-por-dev (KREWHUB_DEV_POD_SCHEME, default do
+    # código: http). "https" se TLS terminar antes do backend (LB/Ingress).
+    scheme: ""
+    # Namespace onde o CHP roda -- usado no namespaceSelector da
+    # NetworkPolicy por-dev (app/k8s_templates.py::build_networkpolicy),
+    # no self-register do próprio krewhub-central no CHP
+    # (app/main.py::_self_register_route) e na busca do pod do CHP via
+    # exec (app/chp_client.py) -- (KREWHUB_CHP_NAMESPACE). AO CONTRÁRIO
+    # dos campos acima, este É SEMPRE setado no Deployment: "" (default)
+    # NÃO cai no default do CÓDIGO ("kirohub", específico do homelab) --
+    # vira `.Release.Namespace` (o namespace onde o `chp` deste MESMO
+    # chart sobe, ver `chp.enabled` abaixo), o comportamento correto pra
+    # qualquer instalação genérica. Só sobrescreva se o SEU CHP viver num
+    # namespace DIFERENTE do namespace desta release (ex.:
+    # chp.enabled=false, usando um CHP externo a este chart).
+    chpNamespace: ""
+    # Porta da API admin do CHP, usada via exec/curl (nunca exposta por
+    # Service, ver templates/chp-deployment.yaml) -- (KREWHUB_CHP_ADMIN_PORT,
+    # default do código: 8001).
+    chpAdminPort: ""
+
+  # Overlay JSON Patch (RFC 6902) por-cluster aplicado pelo
+  # krewhub-central em cima dos manifests genéricos que ele gera pra CADA
+  # pod-por-dev (ver app/overlay.py no repo -- mecanismo que substituiu o
+  # nodeAffinity hardcoded que existia antes). {} (default) = NENHUM
+  # ConfigMap é criado por este chart, e KREWHUB_DEV_POD_OVERLAY_PATH NÃO
+  # é setado -- build_deployment/build_pvc geram manifest 100% genérico
+  # (sem afinidade/tolerations/nada de cluster nenhum). Preenchido, vira
+  # um ConfigMap (`krewhub-dev-pod-overlay`) montado em
+  # /etc/krewhub/dev-pod-overlay no krewhub-central, com
+  # KREWHUB_DEV_POD_OVERLAY_PATH apontando pro arquivo montado. Formato:
+  # um dict {recurso: [operações JSON Patch]}, uma chave por build_* que
+  # suporta overlay hoje (deployment, pvc) -- ver README, seção "Overlay
+  # JSON Patch por-cluster", pro porquê de JSON Patch e não merge patch.
+  # Exemplo genérico (restringir o pod-por-dev a nós com um label
+  # específico -- qualquer cluster, sem citar nenhum ambiente real):
+  #
+  # devPodOverlay:
+  #   deployment:
+  #     - op: add
+  #       path: /spec/template/spec/nodeSelector
+  #       value:
+  #         disktype: ssd
+  #   pvc: []
+  devPodOverlay: {}
+
+  # Passthrough genérico de scheduling -- vazio por default (deixa o
+  # scheduler do k8s decidir livremente). Preencha se o SEU cluster
+  # tiver alguma restrição de topologia (ex.: um CSI que só roda em
+  # certos nós). Exemplo genérico (restringir a nós control-plane):
+  #
+  # affinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #         - matchExpressions:
+  #             - key: node-role.kubernetes.io/control-plane
+  #               operator: Exists
+  affinity: {}
+  nodeSelector: {}
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+chp:
+  # Desligar se você já tiver um configurable-http-proxy próprio (ou
+  # outro proxy host-routing) rodando fora deste chart, e só quiser o
+  # krewhub-central.
+  enabled: true
+
+  image:
+    repository: docker.io/jupyterhub/configurable-http-proxy
+    tag: "5.3.0"
+
+  # Nome de um Secret Opaque JÁ EXISTENTE com a chave abaixo
+  # (CONFIGPROXY_AUTH_TOKEN) -- nunca criado por este chart. AO
+  # CONTRÁRIO do Secret OIDC acima, este é INDISPENSÁVEL pro container
+  # do CHP sequer iniciar (env var sem valorFrom resolvível =
+  # CreateContainerConfigError) -- por isso, deixar "" faz
+  # `helm template`/`helm install` FALHAREM explicitamente (função
+  # `required`) em vez de renderizar um Deployment que nunca vai subir.
+  adminToken:
+    existingSecretName: ""
+    key: token
+
+  service:
+    port: 8000
+
+  # Passthrough genérico de scheduling do CHP -- vazio por default
+  # (deixa o scheduler do k8s decidir livremente), mesmo formato de
+  # krewhubCentral.affinity/nodeSelector/tolerations acima. Preencha se
+  # o SEU cluster tiver alguma restrição de topologia/taint (ex.: nodes
+  # taintados NoSchedule em nodepools dedicados por workload, comum em
+  # EKS) -- sem isso o pod do CHP fica Pending pra sempre, e sem CHP não
+  # há host-routing (a instalação inteira não sobe). Exemplo genérico
+  # (tolerar um taint dedicado):
+  #
+  # tolerations:
+  #   - key: dedicated
+  #     operator: Equal
+  #     value: infra
+  #     effect: NoSchedule
+  affinity: {}
+  nodeSelector: {}
+  tolerations: []
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi

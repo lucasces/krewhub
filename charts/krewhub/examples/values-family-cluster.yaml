@@ -1,0 +1,44 @@
+# Exemplo de override pro homelab galaxy-far-far-away (cluster
+# `family-cluster`) -- NÃO é o default do chart (ver values.yaml raiz,
+# que é genérico de propósito). Este arquivo documenta os valores REAIS
+# usados em produção hoje, e serve pra validar `helm template` contra o
+# estado ao vivo sem regressão (ver README, seção "Empacotamento Helm").
+#
+# Pré-requisito: os Secrets abaixo já precisam existir no namespace
+# `kirohub` antes de qualquer install/upgrade -- este chart nunca os
+# cria (ver README/values.yaml).
+#   kubectl -n kirohub create secret docker-registry ghcr-pull ...
+#   kubectl -n kirohub create secret generic chp-admin-token --from-literal=token=...
+#   kubectl -n kirohub create secret generic krewhub-oidc \
+#     --from-literal=issuer=... --from-literal=client-id=... \
+#     --from-literal=client-secret=... --from-literal=redirect-uri=... \
+#     --from-literal=session-secret=...
+
+krewhubCentral:
+  imagePullSecretName: ghcr-pull
+
+  persistence:
+    # Única StorageClass deste cluster (sem default anotado) -- ver
+    # values.yaml raiz pro porquê do default genérico ser "".
+    storageClassName: rook-cephfs
+
+  oidc:
+    existingSecretName: krewhub-oidc
+
+  selfHost: krewhub.kiro.internal
+
+  # O CSI do rook-cephfs neste cluster só roda nos nós control-plane
+  # (coruscant, tatooine) -- sem isso o pod trava em FailedMount num
+  # worker. Ver values.yaml raiz pro porquê disso ser passthrough
+  # genérico, não uma flag específica deste chart.
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+
+chp:
+  adminToken:
+    existingSecretName: chp-admin-token

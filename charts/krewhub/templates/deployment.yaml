@@ -1,0 +1,225 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: krewhub-central
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+    {{- include "krewhubCentral.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.krewhubCentral.replicaCount }}
+  strategy:
+    # Recreate, não RollingUpdate -- o estado em memória (_pending_logins,
+    # OWNER_LABEL_KEY etc.) e a única réplica assumida pelo código não
+    # suportam dois pods coexistindo durante um rollout.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "krewhubCentral.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "krewhub.labels" . | nindent 8 }}
+        {{- include "krewhubCentral.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "krewhubCentral.serviceAccountName" . }}
+      {{- if .Values.krewhubCentral.imagePullSecretName }}
+      imagePullSecrets:
+        - name: {{ .Values.krewhubCentral.imagePullSecretName }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.krewhubCentral.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.krewhubCentral.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.krewhubCentral.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: krewhub-central
+          image: "{{ .Values.krewhubCentral.image.repository }}:{{ .Values.krewhubCentral.image.tag }}"
+          imagePullPolicy: {{ .Values.krewhubCentral.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            # Namespace COMPARTILHADO onde todos os pods de dev vivem --
+            # explícito aqui mesmo sendo igual ao default do código, pra
+            # ficar visível no manifest sem precisar ler config.py.
+            - name: KREWHUB_DEV_NAMESPACE
+              value: {{ .Values.devNamespace.name | quote }}
+            # PVC montada em /data -- sobrevive a restart, diferente do
+            # default `./krewhub.db` (filesystem efêmero do container).
+            - name: KREWHUB_DB_PATH
+              value: {{ .Values.krewhubCentral.dbPath | quote }}
+            {{- if .Values.krewhubCentral.selfHost }}
+            # Auto-registra a própria rota no CHP no startup (ver
+            # app/main.py::_self_register_route) -- reaproveita o
+            # host-routing já usado pros pods de dev em vez de uma
+            # Ingress nova (não há Ingress controller neste cluster).
+            - name: KREWHUB_SELF_HOST
+              value: {{ .Values.krewhubCentral.selfHost | quote }}
+            - name: KREWHUB_SELF_PORT
+              value: {{ .Values.krewhubCentral.selfPort | quote }}
+            {{- end }}
+            {{- with .Values.krewhubCentral.devPodTemplate.storageClass }}
+            # StorageClass do PVC de workspace de CADA pod-por-dev (ver
+            # app/k8s_templates.py::build_pvc) -- só presente se
+            # krewhubCentral.devPodTemplate.storageClass vier setado.
+            - name: KREWHUB_STORAGE_CLASS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.krewhubCentral.devPodTemplate.storageSize }}
+            - name: KREWHUB_STORAGE_SIZE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.krewhubCentral.devPodTemplate.baseDomain }}
+            # Domínio base do host-routing por-dev, <slug>.<baseDomain>
+            # (ver app/k8s_templates.py::host_for).
+            - name: KREWHUB_BASE_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.krewhubCentral.devPodTemplate.kirocrewImage }}
+            # Imagem do container kirocrew que cada pod-por-dev roda (ver
+            # app/k8s_templates.py::build_deployment).
+            - name: KREWHUB_KIROCREW_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.krewhubCentral.devPodTemplate.publicPort }}
+            - name: KREWHUB_PUBLIC_PORT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.krewhubCentral.devPodTemplate.scheme }}
+            # Scheme publico em que os pods-por-dev sao alcancados pelo
+            # browser (KREWHUB_DEV_POD_SCHEME, default do codigo: http).
+            # Setar pra "https" quando TLS termina na borda (Ingress/ALB)
+            # e o backend e HTTP puro -- senao KIROCREW_CORS_ORIGINS nunca
+            # bate com o Origin real do browser (ver
+            # app/k8s_templates.py::build_configmap).
+            - name: KREWHUB_DEV_POD_SCHEME
+              value: {{ . | quote }}
+            {{- end }}
+            # Namespace onde o CHP roda -- usado no namespaceSelector da
+            # NetworkPolicy por-dev (k8s_templates.py::build_networkpolicy),
+            # no self-register do próprio krewhub-central no CHP
+            # (main.py::_self_register_route) e na busca do pod do CHP via
+            # exec (chp_client.py). AO CONTRÁRIO dos blocos acima, este
+            # env var é SEMPRE setado: sem override, cai no namespace
+            # desta release (onde o `chp` deste mesmo chart sobe, ver
+            # chp.enabled) -- NÃO no default do código ("kirohub",
+            # específico do homelab), que quebraria esses três pontos se
+            # a release não for no namespace "kirohub". Ver
+            # devPodTemplate.chpNamespace em values.yaml.
+            - name: KREWHUB_CHP_NAMESPACE
+              value: {{ .Values.krewhubCentral.devPodTemplate.chpNamespace | default .Release.Namespace | quote }}
+            {{- with .Values.krewhubCentral.devPodTemplate.chpAdminPort }}
+            # Porta da API admin do CHP, usada via exec/curl (ver
+            # app/chp_client.py) -- nunca exposta por Service.
+            - name: KREWHUB_CHP_ADMIN_PORT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.krewhubCentral.devPodOverlay }}
+            # Overlay JSON Patch (RFC 6902) por-cluster (ver app/overlay.py
+            # e templates/dev-pod-overlay-configmap.yaml) -- só presente
+            # se krewhubCentral.devPodOverlay vier preenchido.
+            - name: KREWHUB_DEV_POD_OVERLAY_PATH
+              value: /etc/krewhub/dev-pod-overlay/dev-pod-overlay.yaml
+            {{- end }}
+            {{- if .Values.krewhubCentral.oidc.existingSecretName }}
+            # OIDC -- client_secret é uma credencial real, por isso vem
+            # de um Secret JÁ EXISTENTE (não criado por este chart, ver
+            # README "Empacotamento Helm"). Só a REFERÊNCIA (nome/chave)
+            # é parametrizada aqui. Bloco inteiro OMITIDO se
+            # existingSecretName não vier setado -- o app tolera isso
+            # nativamente (sobe normal, só `/login` e os endpoints de
+            # sessão ficam indisponíveis até configurar).
+            - name: KREWHUB_OIDC_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.krewhubCentral.oidc.existingSecretName }}
+                  key: {{ .Values.krewhubCentral.oidc.issuerKey }}
+            - name: KREWHUB_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.krewhubCentral.oidc.existingSecretName }}
+                  key: {{ .Values.krewhubCentral.oidc.clientIdKey }}
+            - name: KREWHUB_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.krewhubCentral.oidc.existingSecretName }}
+                  key: {{ .Values.krewhubCentral.oidc.clientSecretKey }}
+            - name: KREWHUB_OIDC_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.krewhubCentral.oidc.existingSecretName }}
+                  key: {{ .Values.krewhubCentral.oidc.redirectUriKey }}
+            # Assina/valida o cookie/Bearer de sessão própria do KrewHub
+            # (app/auth.py) -- não é o client_secret OIDC (esse continua
+            # só pro exchange com o IdP); é um segredo próprio do
+            # KrewHub, mesma exceção de não-versionar em git. Vem do
+            # MESMO Secret acima -- ver README pro porquê de agrupar os
+            # dois (mesma decisão já em produção).
+            - name: KREWHUB_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.krewhubCentral.oidc.existingSecretName }}
+                  key: {{ .Values.krewhubCentral.oidc.sessionSecretKey }}
+            {{- end }}
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.krewhubCentral.devPodOverlay }}
+            # ConfigMap criado em templates/dev-pod-overlay-configmap.yaml
+            # -- ver KREWHUB_DEV_POD_OVERLAY_PATH acima. readOnly -- o
+            # serviço só lê esse arquivo, nunca escreve nele.
+            - name: dev-pod-overlay
+              mountPath: /etc/krewhub/dev-pod-overlay
+              readOnly: true
+            {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.krewhubCentral.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.krewhubCentral.persistence.name }}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.krewhubCentral.devPodOverlay }}
+        # ConfigMap criado em templates/dev-pod-overlay-configmap.yaml --
+        # overlay JSON Patch (RFC 6902) por-dev (ver comentário no
+        # volumeMount acima).
+        - name: dev-pod-overlay
+          configMap:
+            name: krewhub-dev-pod-overlay
+        {{- end }}

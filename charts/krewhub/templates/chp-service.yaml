@@ -1,0 +1,21 @@
+{{- if .Values.chp.enabled }}
+# Só a porta pública (8000) é exposta. A porta de admin (8001) NUNCA tem
+# entrada aqui de propósito -- ver comentário em chp-deployment.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: configurable-http-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+    {{- include "chp.selectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "chp.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: public
+      port: {{ .Values.chp.service.port }}
+      targetPort: 8000
+      protocol: TCP
+{{- end }}

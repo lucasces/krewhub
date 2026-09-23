@@ -1,0 +1,15 @@
+{{- if .Values.devNamespace.create }}
+# Namespace COMPARTILHADO onde TODOS os pods de dev (kirocrew-<slug>)
+# vivem -- criado aqui DECLARATIVAMENTE (o reconcile do krewhub-central
+# só CONFIRMA que existe via get/list/watch, nunca cria/edita
+# Namespace -- ver clusterrole.yaml). NÃO é um recurso "por-dev": é
+# infra estática do hub, parte do lifecycle deste chart mesmo os PODS
+# que nascem dentro dele não sendo (ver README, "Empacotamento Helm").
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.devNamespace.name }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+    krewhub.pespa.net/managed-by: krewhub-central
+{{- end }}

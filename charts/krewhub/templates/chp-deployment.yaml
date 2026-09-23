@@ -1,0 +1,108 @@
+{{- if .Values.chp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: configurable-http-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "krewhub.labels" . | nindent 4 }}
+    {{- include "chp.selectorLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "chp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "krewhub.labels" . | nindent 8 }}
+        {{- include "chp.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.chp.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.chp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.chp.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: configurable-http-proxy
+          image: "{{ .Values.chp.image.repository }}:{{ .Values.chp.image.tag }}"
+          # --host-routing: o dashboard do Kiro Crew não suporta
+          # base_url/path prefix (investigado e confirmado ao vivo,
+          # decisão #1 do plano) -- roteamos por Host: header /
+          # subdomínio, não por path.
+          #
+          # --api-ip 127.0.0.1: a API de administração (criar/remover
+          # rotas) fica só em loopback dentro deste pod -- sem Service
+          # nem NetworkPolicy abrindo a porta 8001 pra fora. O
+          # krewhub-central fala com ela via `kubectl exec` (nunca abre
+          # rede nova).
+          command:
+            - configurable-http-proxy
+            - --ip
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --api-ip
+            - "127.0.0.1"
+            - --api-port
+            - "8001"
+            - --host-routing
+            - --log-level
+            - info
+          env:
+            - name: CONFIGPROXY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  # required(): este Secret é INDISPENSÁVEL pro container
+                  # sequer iniciar (sem valorFrom resolvível =
+                  # CreateContainerConfigError) -- falha aqui, em tempo de
+                  # `helm template`/`helm install`, é melhor que deixar
+                  # subir um Deployment que nunca fica Ready. Nunca criado
+                  # por este chart (ver values.yaml/README).
+                  name: {{ required "chp.adminToken.existingSecretName é obrigatório quando chp.enabled=true -- crie o Secret (chave indicada em chp.adminToken.key) antes do install/upgrade" .Values.chp.adminToken.existingSecretName }}
+                  key: {{ .Values.chp.adminToken.key }}
+          ports:
+            - containerPort: 8000
+              name: public
+            # 8001 (admin) deliberadamente SEM entrada correspondente no
+            # Service -- ver comentário acima.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.chp.resources | nindent 12 }}
+          readinessProbe:
+            # CHP não expõe um /health dedicado na porta pública; TCP
+            # socket é o sinal correto (só aceita conexão quando pronto).
+            tcpSocket:
+              port: 8000
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

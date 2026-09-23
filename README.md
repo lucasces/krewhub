@@ -38,12 +38,15 @@ kubeconfig local se isso falhar.
   (create-se-não-existir / patch-se-já-existir) de: Namespace, Secret
   (`kiro-owner-id`), ConfigMap (`kiro-config`, incluindo
   `KIROCREW_CORS_ORIGINS` pro Host-header allowlist do dashboard), PVC
-  (`kiro-workspace`, `rook-cephfs` RWO), Service, NetworkPolicy (só CHP
-  alcança a porta 5476), e o Deployment `kirocrew` — com TODO o
-  hardening já validado ao vivo nas fatias anteriores (nodeAffinity
-  control-plane pro CSI cephfs, `seccompProfile: Unconfined` só no
-  container pro sandbox `unshare(CLONE_NEWUSER)` funcionar, `fsGroup:
-  1000`, `readOnlyRootFilesystem`, drop ALL caps). Depois espera o pod
+  (`kiro-workspace`, `rook-cephfs` RWO por default -- configurável via
+  `KREWHUB_STORAGE_CLASS`), Service, NetworkPolicy (só CHP alcança a
+  porta 5476), e o Deployment `kirocrew` — com TODO o hardening já
+  validado ao vivo nas fatias anteriores (`seccompProfile: Unconfined` só
+  no container pro sandbox `unshare(CLONE_NEWUSER)` funcionar, `fsGroup:
+  1000`, `readOnlyRootFilesystem`, drop ALL caps) + qualquer overlay JSON
+  Patch configurado por cima (ex.: o nodeAffinity pro control-plane deste
+  cluster -- ver seção "Overlay JSON Patch por-cluster" abaixo). Depois
+  espera o pod
   ficar Ready e registra a rota no CHP via `exec` no pod dele (a API de
   admin do CHP é loopback-only de propósito — ver
   `galaxy-far-far-away/clusters/family-cluster/kirohub/chp/deployment.yaml`
@@ -119,12 +122,13 @@ Config (todas opcionais, têm default seguro pra este cluster — exceto as
 | `KREWHUB_DEV_NAMESPACE` | `krewhub-devs` (namespace ÚNICO e compartilhado onde TODOS os pods de dev vivem -- ver seção "Namespace único compartilhado pra pods de dev" abaixo; criado declarativamente no GitOps, não pelo reconcile) |
 | `KREWHUB_BASE_DOMAIN` | `kiro.internal` |
 | `KREWHUB_PUBLIC_PORT` | `8080` (porta local do port-forward do CHP hoje) |
+| `KREWHUB_DEV_POD_SCHEME` | `http` (setar `https` quando TLS termina na borda/Ingress/ALB e o backend interno é HTTP puro -- senão `KIROCREW_CORS_ORIGINS`/`dashboard_url_with_token` saem com scheme errado e o CSRF-origin check rejeita) |
 | `KREWHUB_KIROCREW_IMAGE` | `ghcr.io/kirodotdev/kirocrew:0.6.0` |
 | `KREWHUB_STORAGE_CLASS` | `rook-cephfs` |
 | `KREWHUB_STORAGE_SIZE` | `10Gi` |
 | `KREWHUB_CHP_NAMESPACE` | `kirohub` (nome do namespace em si -- ver nota de rebrand abaixo) |
 | `KREWHUB_CHP_ADMIN_PORT` | `8001` |
-| `KREWHUB_DB_PATH` | `./krewhub.db` |
+| `KREWHUB_DEV_POD_OVERLAY_PATH` | vazio -- path de um arquivo (YAML ou JSON) com overlay JSON Patch (RFC 6902) aplicado em cima do Deployment/PVC genéricos de cada dev (ver seção "Overlay JSON Patch por-cluster" abaixo). Vazio = manifest 100% genérico, sem nenhuma restrição de nó/StorageClass fixa de cluster |\n| `KREWHUB_DEV_POD_OVERLAY_JSON` | vazio -- mesmo conteúdo do `_PATH` acima, mas inline (fallback pra dev local/smoke test); `_PATH` tem precedência se os dois vierem setados |\n| `KREWHUB_DB_PATH` | `./krewhub.db` |
 | `KREWHUB_SESSION_TTL` | `24h` (passado a `kirocrew token --ttl`) |
 | `KREWHUB_OIDC_ISSUER`/`_CLIENT_ID`/`_CLIENT_SECRET`/`_REDIRECT_URI`/`_SCOPES` | vazio (em cluster, vem do Secret `krewhub-oidc`, ver seção "Exchange OIDC real" abaixo) |
 | `KREWHUB_SESSION_SECRET` | vazio -- segredo próprio do KrewHub pra assinar/validar o cookie/Bearer de sessão (ver seção "Autenticação dos próprios endpoints"); em cluster vem do Secret `krewhub-oidc`, chave `session-secret` |
@@ -133,7 +137,69 @@ Config (todas opcionais, têm default seguro pra este cluster — exceto as
 | `KREWHUB_SELF_HOST` | vazio -- se setado, auto-registra a própria rota no CHP no startup (ver seção "Deploy no cluster") |
 | `KREWHUB_SELF_PORT` | `8080` |
 
-## Testes automatizados (suíte rápida, offline -- 109 testes, ~1.4s)
+## Overlay JSON Patch por-cluster (nodeAffinity, tolerations, etc.)
+
+**Achado de investigação anterior** (agente Kiro externo investigando
+adoção do KrewHub num cluster EKS+Karpenter): `build_deployment` tinha um
+`nodeAffinity` exigindo `node-role.kubernetes.io/control-plane`
+**hardcoded direto no Python**, sem nenhuma env var nem via de
+configuração -- decisão real deste homelab (o CSI do `rook-cephfs` só
+roda nos nós `coruscant`/`tatooine`, ambos control-plane), mas impossível
+de desligar/trocar sem editar `app/k8s_templates.py`. Diferente de
+`KREWHUB_STORAGE_CLASS` (que já era configurável, só o *default* era
+`rook-cephfs`), o `nodeAffinity` não tinha escape hatch nenhum.
+
+**Mecanismo:** `app/overlay.py` aplica um overlay **JSON Patch (RFC
+6902)**, via a lib `jsonpatch`, em cima do manifest genérico que
+`build_deployment`/`build_pvc` geram. Cada `build_*` monta o dict
+genérico normalmente e devolve `apply_overlay(manifest,
+load_overlay_ops(settings, "<recurso>"))` -- sem overlay configurado,
+`apply_overlay` devolve o manifest intocado (100% genérico, roda em
+qualquer cluster k8s, sem afinidade nem storageClass fixa nenhuma).
+
+**Por que JSON Patch e não strategic-merge-patch nem JSON Merge Patch
+(RFC 7396):** não existe lib Python madura que replique client-side o
+algoritmo de merge do k8s (que entende `containers`/`volumes` por
+`name`, mas *não* tem merge-key nenhuma pra `tolerations` -- reimplementar
+isso à mão é reinventar uma peça não-trivial do apimachinery). JSON Merge
+Patch é simples mas substitui QUALQUER lista por inteiro (um overlay de
+`volumes` apagaria o volume do workspace PVC se não o repetisse por
+inteiro). JSON Patch é mais verboso mas cada operação é explícita
+(`add`/`remove`/`replace` com `path`) e nunca apaga o que não foi pedido
+-- ver docstring completa em `app/overlay.py`.
+
+**Onde configurar:** `KREWHUB_DEV_POD_OVERLAY_PATH` (path de um arquivo
+YAML/JSON, tipicamente montado via ConfigMap gerenciado fora do chart
+Helm genérico -- mesmo padrão já usado pros outros recursos por-dev) ou
+`KREWHUB_DEV_POD_OVERLAY_JSON` (conteúdo inline, fallback pra dev
+local/smoke test). O arquivo/conteúdo é um dict `{recurso: [operações]}`,
+uma chave por `build_*` que suporta overlay hoje (`deployment`, `pvc`):
+
+```yaml
+# Equivalente exato ao nodeAffinity que antes estava hardcoded em
+# build_deployment -- é o overlay real usado no galaxy-far-far-away
+# (ver clusters/family-cluster/kirohub/krewhub-central/dev-pod-overlay-configmap.yaml
+# no repo GitOps).
+deployment:
+  - op: add
+    path: /spec/template/spec/affinity
+    value:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+pvc: []
+```
+
+**Limitação documentada pra `pvc`:** a spec de um PVC é majoritariamente
+imutável após a criação (só `resources.requests.storage` pode crescer) --
+um overlay que mude `storageClassName`/`accessModes` só pega em PVCs
+criados DEPOIS da mudança de overlay; num PVC já existente o apiserver
+rejeita o patch (422). Comportamento nativo do k8s, não deste mecanismo.
+
+## Testes automatizados (suíte rápida, offline -- 122 testes, ~2.2s)
 
 Suíte de **regressão pra rodar antes de cada deploy** -- diferente do
 smoke-test manual documentado nas seções abaixo ("Provado ao vivo" e as
@@ -1402,6 +1468,631 @@ bloqueio. `external`: já funcional como fallback manual, mas nunca
 testado ao vivo nesta fatia (não havia necessidade -- `podman-machine`
 funcionou de primeira depois de resolvido o `helper_binaries_dir`).
 
+## Empacotamento Helm (`charts/krewhub/`)
+
+Chart Helm pro que hoje é aplicado manualmente/via Kustomization solta no
+GitOps (`clusters/family-cluster/kirohub/{krewhub-central,chp}/*.yaml`) --
+**esta fatia só cria e valida o chart, NÃO troca o mecanismo de deploy em
+produção** (segue rodando via GitOps/Flux normalmente até decisão
+explícita em contrário).
+
+### Onde o chart vive, e por quê
+
+`charts/krewhub/` dentro **deste repo** (`~/personal/krewhub`), não no
+repo GitOps (`galaxy-far-far-away`) -- decisão, não default: este é o
+repo de CÓDIGO-FONTE do app (Dockerfile, `app/`, testes), e o padrão mais
+comum (e o que menos acopla os dois repos) é o chart viver junto do
+código que ele empacota, com o GitOps só *consumindo* esse chart (via
+`HelmRelease` apontando pra um `GitRepository`/`OCIRepository` deste
+repo) -- o mesmo padrão de "app repo publica, GitOps repo referencia"
+já usado pra imagem Docker (`ghcr.io/lucasces/krewhub-central`, buildada
+aqui, referenciada lá só pela tag). Deixar o chart no GitOps faria mais
+sentido se ele fosse só configuração de ambiente (values por cluster),
+não definição de recursos -- não é o caso aqui, o chart É a definição
+canônica dos recursos do app.
+
+### Scaffold gerado com `helm create`, não escrito do zero
+
+`helm create krewhub` gerou o boilerplate padrão (`Deployment`/
+`Service`/`Ingress`/`HorizontalPodAutoscaler`/`HTTPRoute`/`tests/` de
+demo, apontando pra uma imagem `nginx` de exemplo). Removidos por
+completo: `templates/hpa.yaml`, `templates/httproute.yaml`,
+`templates/ingress.yaml`, `templates/tests/` -- nada disso existe no
+deploy real hoje (sem HPA, sem Ingress controller no cluster, sem Gateway
+API). `deployment.yaml`/`service.yaml`/`serviceaccount.yaml`/
+`_helpers.tpl`/`NOTES.txt` foram mantidos como arquivo mas o CONTEÚDO
+inteiro foi reescrito pros recursos reais (ver abaixo) -- nada do
+boilerplate original de demo sobrou.
+
+### O que o chart cobre -- e o que DELIBERADAMENTE não cobre
+
+Cobre exatamente os dois componentes ESTÁTICOS que já rodam em produção,
+fonte de verdade = os manifests atuais em
+`clusters/family-cluster/kirohub/{krewhub-central,chp}/*.yaml`:
+
+- **`krewhub-central`**: `Deployment`, `Service`, `ServiceAccount`,
+  `ClusterRole`/`ClusterRoleBinding` (RBAC mínimo, idêntico ao já
+  documentado), `PersistentVolumeClaim` (SQLite).
+- **`configurable-http-proxy` (CHP)**: `Deployment`, `Service`.
+- **`Namespace krewhub-devs`** (compartilhado, ver seção "Namespace
+  único compartilhado" acima) -- é infra ESTÁTICA do hub (existe
+  independente de qualquer dev logado), por isso faz parte do chart,
+  mesmo não sendo "por-dev".
+
+**NÃO cobre, de propósito, sem ambiguidade**: os recursos POR-DEV
+(`Secret kiro-owner-id-<slug>`, `ConfigMap kiro-config-<slug>`, `Service
+kirocrew-<slug>`, `PVC kiro-workspace-<slug>`, `NetworkPolicy
+allow-chp-to-dashboard-only-<slug>`, `Deployment kirocrew-<slug>`, todos
+dentro de `krewhub-devs`) -- esses continuam sendo criados/atualizados
+dinamicamente pelo `k8s_manager.py`/`k8s_templates.py` do próprio
+`krewhub-central` via client Python `kubernetes`, fora do lifecycle do
+Helm. **Consequência explícita**: `helm uninstall`/`helm upgrade` NUNCA
+tocam nesses recursos (nem cria, nem atualiza, nem remove) -- eles vivem
+e morrem por ação da própria API do app, não do Helm. Documentado
+também em `templates/NOTES.txt` (mostrado depois de todo
+`install`/`upgrade`) pra não virar ambiguidade depois.
+
+### Correção aplicada: chart genérico, desacoplado do homelab -- e gestão de Secret 100% do operador
+
+Duas correções explícitas pedidas depois da primeira versão desta
+fatia, já incorporadas no chart e revalidadas (`helm lint`/`helm
+template`/comparação ao vivo repetidos depois da mudança, mesmo
+resultado sem regressão):
+
+1. **Nada de específico do homelab `galaxy-far-far-away` como default
+   implícito.** Removidos/generalizados:
+   - `krewhubCentral.persistence.storageClassName` -- default agora é
+     `""` (o campo `storageClassName` fica OMITIDO do manifest, não
+     setado como string vazia -- diferença real: omitir = usa a
+     StorageClass default do cluster; `storageClassName: ""` explícito
+     SIGNIFICARIA "sem StorageClass nenhuma"). `rook-cephfs` (única
+     StorageClass do cluster real) vira só um exemplo documentado.
+   - A `nodeAffinity` fixa pro CSI do rook-cephfs (que só roda em nós
+     control-plane) virou um **passthrough genérico**
+     (`krewhubCentral.affinity`/`nodeSelector`/`tolerations`, todos
+     `{}`/`[]` por default) -- o chart não assume NENHUMA topologia de
+     nó de nenhum cluster. O valor real do homelab é só um exemplo
+     comentado em `values.yaml` e no arquivo de override abaixo.
+   - `krewhubCentral.selfHost` (domínio `krewhub.kiro.internal`) e
+     `krewhubCentral.imagePullSecretName` (nome `ghcr-pull`) tinham
+     valores default do homelab real -- agora `""` por default (recurso
+     desligado/pulado até configurar explicitamente).
+   - Removido o value `namespace: kirohub` do topo (não era lido por
+     nenhum template, só documentação solta -- o namespace de instalação
+     é sempre o passado em `helm install -n <ns>`).
+   - Novo arquivo `charts/krewhub/examples/values-family-cluster.yaml`:
+     os valores REAIS do homelab (antigos defaults), agora como um
+     override explícito de exemplo, usado só pra validar o chart contra
+     o cluster real (`helm template ... -f examples/values-family-cluster.yaml`)
+     -- nunca aplicado como default do chart em si.
+
+2. **Gestão de Secret é 100% do operador, sem exceção -- e agora com
+   duas posturas diferentes, deliberadas:**
+   - **`chp.adminToken.existingSecretName`** (era
+     `chp.adminTokenSecretName`): Secret INDISPENSÁVEL pro container do
+     CHP sequer iniciar (sem ele, `CreateContainerConfigError`). Default
+     `""` faz `helm template`/`helm install`/`helm lint --strict`
+     **falharem explicitamente** via `required()` do Helm, com mensagem
+     dizendo exatamente o que falta e por quê -- em vez de renderizar
+     (ou pior, aplicar) um Deployment que nunca vai ficar Ready.
+   - **`krewhubCentral.oidc.existingSecretName`**: diferente do CHP, o
+     app TOLERA nativamente a ausência desta config (`/login` responde
+     501 explicando o que falta; o resto do serviço sobe normal). Por
+     isso o chart não força um `required()` aqui -- com `""` (default),
+     o bloco inteiro de env vars OIDC/sessão é OMITIDO do Deployment
+     (não um secretKeyRef quebrado apontando pra Secret vazio), e
+     `templates/NOTES.txt` deixa explícito, no output do
+     `install`/`upgrade`, que isso é um pré-requisito funcional
+     pendente -- consistente com "documente que é pré-requisito" sendo
+     a alternativa aceitável a "falhe" quando o próprio app já degrada
+     bem sozinho.
+   - **`krewhubCentral.imagePullSecretName`**: mesmo padrão de antes
+     (opcional, `""` = nenhum), só que agora sem um nome de exemplo do
+     homelab (`ghcr-pull`) como default.
+   - Em nenhum dos três casos o chart cria, gera ou assume um mecanismo
+     específico de gestão de segredo (nada de Bitwarden/sealed-secrets
+     embutido) -- só referencia por nome/chave um Secret que o operador
+     já trouxe pra existir.
+
+### Confirmação explícita, com evidência: `values.yaml` NUNCA carrega o valor de um token/segredo -- só o NOME do `Secret`
+
+Dúvida legítima levantada e verificada campo a campo, não de memória:
+**todo campo `*.existingSecretName` deste chart guarda o NOME de um
+objeto `Secret` do Kubernetes já existente no cluster (uma string curta
+tipo `"krewhub-chp-admin"`), nunca o valor literal do token/segredo em
+si.** O valor real do segredo nunca passa por `values.yaml`, por nenhum
+template, nem pela saída de `helm template` -- ele mora exclusivamente
+dentro do objeto `Secret` no cluster, que o Kubernetes resolve em tempo
+de execução do pod via `secretKeyRef`, uma referência indireta.
+
+Evidência 1 -- `values.yaml`, o campo em si:
+```yaml
+chp:
+  adminToken:
+    existingSecretName: ""   # NOME do Secret, não o token
+    key: token                # NOME da chave dentro do Secret, não o valor dela
+```
+
+Evidência 2 -- o template (`templates/chp-deployment.yaml`) usa esse
+valor só como `secretKeyRef.name`/`secretKeyRef.key` (campos de
+REFERÊNCIA do próprio Kubernetes, nunca `value:` direto):
+```yaml
+- name: CONFIGPROXY_AUTH_TOKEN
+  valueFrom:
+    secretKeyRef:
+      name: {{ required "..." .Values.chp.adminToken.existingSecretName }}
+      key: {{ .Values.chp.adminToken.key }}
+```
+
+Evidência 3 -- `helm template` renderizado de verdade
+(`--set chp.adminToken.existingSecretName=krewhub-chp-admin`, rodado ao
+vivo pra esta verificação), mostrando que SÓ o nome do Secret aparece no
+manifest final, nunca um valor de token:
+```yaml
+            - name: CONFIGPROXY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: krewhub-chp-admin
+                  key: token
+```
+
+Evidência 4 -- varredura por qualquer campo que aceitasse o valor
+LITERAL em vez da referência (`grep -rniE "token:|secret:|password:|credential"`
+em `values.yaml`, `examples/`, `templates/`, `README.md`): os únicos
+resultados são os nomes de CHAVE do próprio Helm (`adminToken:`, a
+chave YAML que agrupa `existingSecretName`+`key`) -- nenhuma ocorrência
+de um campo tipo `token: <valor>`/`password: <valor>` em lugar nenhum do
+chart. O `required()` do Helm falha exclusivamente por falta do NOME
+(string vazia) -- ele não sabe nem tem como saber se o segredo real
+dentro daquele Secret é válido; só garante que ALGUM nome de Secret foi
+apontado antes de gerar um Deployment que dependeria de um `valueFrom`
+vazio.
+
+Mesma garantia vale, com a mesma evidência de padrão, pro Secret OIDC
+(`krewhubCentral.oidc.existingSecretName`) e pro `imagePullSecretName` --
+os três seguem exatamente esta mesma forma (nome + chave(s), nunca
+valor).
+
+### Nomes de recurso são FIXOS, não gerados por `<release>-<chart>`
+
+Diferente do padrão usual de chart Helm (`{{ include "chart.fullname" }}`
+gerando nomes tipo `krewhub-krewhub-central`), os nomes aqui são fixos
+(`krewhub-central`, `configurable-http-proxy`, `krewhub-central-data`,
+...) ou vêm direto de `values.yaml` -- de propósito, pra bater
+EXATAMENTE com o que já está rodando. Selector labels dos Deployments
+(`app: krewhub-central`/`app: configurable-http-proxy`) também
+preservados como estão hoje, não trocados por
+`app.kubernetes.io/name` -- selector de Deployment é IMUTÁVEL; usar um
+selector diferente forçaria `kubectl delete` + recriação (downtime) se
+este chart algum dia substituir o deploy atual.
+
+### Validação -- `helm lint` + `helm template` comparado ao vivo, sem regressão
+
+```bash
+cd charts/krewhub
+helm lint .                                                 # values genéricos (default) -- OK
+helm template krewhub . --namespace kirohub                 # FALHA de propósito: chp.adminToken.existingSecretName obrigatório
+helm template krewhub . --namespace kirohub \
+  -f examples/values-family-cluster.yaml                    # override real do homelab -- renderiza limpo
+```
+
+`helm lint .` com values default: 0 chart(s) failed (só um aviso
+informativo de `icon` ausente, não é erro -- o `required()` do CHP só
+aparece como `[INFO] Missing required value` no lint, que não falha por
+padrão; `helm template`/`helm install` SIM falham, com exit code 1 e a
+mensagem completa -- testado ao vivo dos dois jeitos).
+
+Comparação real (com o override `examples/values-family-cluster.yaml`,
+que reproduz os valores reais do homelab): rodei `kubectl get <cada um
+dos 9 recursos> -o yaml`
+contra o cluster `galaxy-far-far-away` (produção) e comparei campo a
+campo contra a saída do `helm template` (normalizando só o que o
+apiserver preenche sozinho -- `status`, `resourceVersion`,
+`managedFields`, defaults de probe/`Pod`/`Service`/`PVC`, anotações do
+`kubectl`/Flux). **Resultado: a ÚNICA diferença real em todos os 9
+recursos são os labels novos que o Helm adiciona** (`helm.sh/chart`,
+`app.kubernetes.io/managed-by`, `app.kubernetes.io/part-of`,
+`app.kubernetes.io/version`) -- puramente aditivos, não removem nem
+mudam nenhum label/selector existente. Zero diferença de spec real
+(imagem, env vars, volumes, probes, resources, RBAC rules -- tudo
+idêntico).
+
+Validação adicional: `kubectl apply --dry-run=server -f
+<helm-template-output>` contra o cluster real (server-side dry-run --
+valida contra o apiserver de verdade SEM persistir nada). Resultado: os
+9 recursos retornaram `configured (server dry run)` -- nenhum
+`created`/erro -- confirmando que o apiserver reconhece cada um como
+correspondendo EXATAMENTE a um recurso já existente (mesmo
+kind+namespace+nome), ou seja, se este chart fosse aplicado de verdade
+hoje seria um update in-place, não uma recriação.
+
+### Template do pod-por-dev configurável via `values.yaml` + overlay JSON Patch por-cluster (chart `0.1.1`)
+
+**Achado que motivou esta fatia**: o chart só expunha, como env var
+parametrizável, `KREWHUB_DEV_NAMESPACE`/`KREWHUB_DB_PATH`/
+`KREWHUB_SELF_HOST`/`KREWHUB_SELF_PORT`/o bloco OIDC. TODAS as outras
+settings do template pod-por-dev (`KREWHUB_STORAGE_CLASS`,
+`KREWHUB_STORAGE_SIZE`, `KREWHUB_BASE_DOMAIN`, `KREWHUB_KIROCREW_IMAGE`,
+`KREWHUB_CHP_NAMESPACE`, `KREWHUB_CHP_ADMIN_PORT`, `KREWHUB_PUBLIC_PORT`)
+caiam sempre no default de `app/config.py` (valores do homelab --
+`rook-cephfs`, `kiro.internal`, `kirohub`, `kirocrew:0.6.0`), e o
+mecanismo de overlay JSON Patch novo (`app/overlay.py`, seção acima)
+não tinha via de configuração NENHUMA pelo chart -- só dava pra ligar
+editando o Deployment à mão (como o GitOps faz hoje, fora do chart).
+Mudança 100% ADITIVA: nenhum default mudou, nenhum manifest do homelab
+regrediu (ver "Validação" abaixo).
+
+**Novos campos, `krewhubCentral.devPodTemplate`** (todos `""` por
+default = env var correspondente OMITIDA do Deployment, o app cai no
+default de `app/config.py`, exatamente como antes desta fatia):
+
+| Campo (`values.yaml`) | Env var | Default do CÓDIGO (`app/config.py`) |
+|---|---|---|
+| `storageClass` | `KREWHUB_STORAGE_CLASS` | `rook-cephfs` |
+| `storageSize` | `KREWHUB_STORAGE_SIZE` | `10Gi` |
+| `baseDomain` | `KREWHUB_BASE_DOMAIN` | `kiro.internal` |
+| `kirocrewImage` | `KREWHUB_KIROCREW_IMAGE` | `ghcr.io/kirodotdev/kirocrew:0.6.0` |
+| `publicPort` | `KREWHUB_PUBLIC_PORT` | `8080` |
+| `scheme` | `KREWHUB_DEV_POD_SCHEME` | `http` |
+| `chpAdminPort` | `KREWHUB_CHP_ADMIN_PORT` | `8001` |
+
+**Exceção deliberada -- `chpNamespace` / `KREWHUB_CHP_NAMESPACE`**: o
+default do CÓDIGO é `"kirohub"` (nome fixo do homelab), mas o CHP
+*deste chart* sobe sempre em `.Release.Namespace` (ver
+`chp-deployment.yaml`) -- e `KREWHUB_CHP_NAMESPACE` é usado em três
+pontos que dependem de bater com onde o CHP REALMENTE está:
+`namespaceSelector` da `NetworkPolicy` por-dev
+(`app/k8s_templates.py::build_networkpolicy`), self-register do próprio
+`krewhub-central` no CHP (`app/main.py::_self_register_route`) e a busca
+do pod do CHP via exec (`app/chp_client.py::_find_chp_pod`). Manter o
+default do CÓDIGO (`"kirohub"`) quebraria os três se a release deste
+chart não for instalada no namespace `kirohub` -- por isso, DIFERENTE
+dos campos acima, o chart SEMPRE seta `KREWHUB_CHP_NAMESPACE`
+(`devPodTemplate.chpNamespace | default .Release.Namespace`), nunca
+omite. Override explícito ainda funciona, pro caso do CHP viver fora
+deste chart/namespace.
+
+**Overlay JSON Patch por-cluster via chart -- `krewhubCentral.devPodOverlay`**:
+`{}` (default) = nenhum `ConfigMap` criado, `KREWHUB_DEV_POD_OVERLAY_PATH`
+NÃO setado (mesmo comportamento de antes desta fatia). Preenchido com o
+mesmo formato de documento que `app/overlay.py` espera
+(`{recurso: [operações JSON Patch]}`, chaves `deployment`/`pvc`), o novo
+template `templates/dev-pod-overlay-configmap.yaml` cria um `ConfigMap`
+(`krewhub-dev-pod-overlay`), `templates/deployment.yaml` monta ele em
+`/etc/krewhub/dev-pod-overlay` (`readOnly`) e seta
+`KREWHUB_DEV_POD_OVERLAY_PATH=/etc/krewhub/dev-pod-overlay/dev-pod-overlay.yaml`
+-- assim o `nodeAffinity`/`tolerations`/o que for específico de CADA
+cluster entra via `values.yaml` na hora do `helm install`/`upgrade`, sem
+editar `app/` nem o Deployment à mão (o jeito como o GitOps faz hoje,
+fora do chart -- ver `dev-pod-overlay-configmap.yaml` no repo GitOps).
+
+**Imagem default bumpada `sha-e006f15` -> `sha-91a483d`**: confirmado
+(`git show <sha>:app/overlay.py`) que a imagem default ANTERIOR do
+chart (`sha-e006f15`) **não continha `app/overlay.py`** -- foi
+adicionado só no commit `91a483d` (o mais recente em HEAD no momento
+desta fatia). Ligar `krewhubCentral.devPodOverlay` contra a imagem
+antiga faria o `krewhub-central` quebrar no boot (`ImportError`). Sem
+necessidade de rebuild: `sha-91a483d` já estava publicado no GHCR e
+rodando ao vivo no homelab (`kirohub/krewhub-central`, pod `Running`,
+confirmado via `kubectl`/`podman manifest inspect` contra o registry
+real) -- só foi preciso apontar `krewhubCentral.image.tag`/`appVersion`
+pra ela.
+
+**Nenhum valor de outro ambiente (EKS, `shared-services-stg`, etc.)
+hardcoded** -- os únicos lugares onde esses nomes aparecem são um
+exemplo comentado em `values.yaml` (`storageClass: gp3`, ilustrativo,
+igual já era feito pro `rook-cephfs`/homelab) e um values fictício
+temporário usado só pra validar `helm template` nesta fatia (removido,
+nunca commitado -- ver "Validação" abaixo).
+
+#### Validação desta fatia
+
+```bash
+cd charts/krewhub
+helm lint .                                                      # 0 chart(s) failed
+helm template krewhub . --namespace kirohub \
+  -f examples/values-family-cluster.yaml                         # homelab -- ver diff abaixo
+helm template krewhub . --namespace shared-services-stg \
+  -f <values fictícios de EKS, não commitados>                   # EKS genérico -- novas env/ConfigMap
+```
+
+**Diff do `helm template` do homelab, ANTES vs. DEPOIS desta fatia**
+(mesmo `examples/values-family-cluster.yaml`, sem nenhum campo novo
+preenchido): a Única diferença de SPEC real é **uma env var nova**,
+`KREWHUB_CHP_NAMESPACE: "kirohub"` (o comportamento correto e
+equivalente ao default do CÓDIGO no namespace `kirohub`, ver exceção
+acima -- não é opção, é uma correção deliberada, não uma regressão), +
+os labels de versão (`helm.sh/chart: krewhub-0.1.1`,
+`app.kubernetes.io/version: "sha-91a483d"`) e a tag de imagem
+(`sha-91a483d`) atualizados -- esperado, mesmo bump documentado acima.
+Nenhum outro campo/env/volume mudou; nenhum `ConfigMap` novo apareceu
+(porque `devPodOverlay` continua `{}` no exemplo do homelab).
+
+**`helm template` com values fictícios de EKS** (`storageClassName: gp3`,
+`devPodTemplate` com `storageClass: gp3`/`storageSize: 20Gi`/
+`baseDomain: s.somosdigital.io`/`kirocrewImage: .../custom-gateway`/
+`publicPort: "8080"`/`chpAdminPort: "8001"`, `devPodOverlay` com um
+`nodeSelector` fictício, `--namespace shared-services-stg` sem override
+de `chpNamespace`) -- renderiza limpo, mostrando:
+- As 6 env vars novas (`KREWHUB_STORAGE_CLASS`, `KREWHUB_STORAGE_SIZE`,
+  `KREWHUB_BASE_DOMAIN`, `KREWHUB_KIROCREW_IMAGE`, `KREWHUB_PUBLIC_PORT`,
+  `KREWHUB_CHP_ADMIN_PORT`) com os valores do EKS fictício.
+- `KREWHUB_CHP_NAMESPACE: "shared-services-stg"` -- confirma o default
+  `.Release.Namespace` funcionando sem nenhum override explícito.
+- Um `ConfigMap krewhub-dev-pod-overlay` novo, com o documento overlay
+  exato passado em `devPodOverlay`.
+- `KREWHUB_DEV_POD_OVERLAY_PATH` setado + o volume/volumeMount novos no
+  Deployment, apontando pro `ConfigMap` acima.
+- Nenhum `nodeAffinity`/`storageClass`/domínio do HOMELAB (`rook-cephfs`,
+  `kiro.internal`, `coruscant`/`tatooine`) em lugar nenhum da saída.
+
+### O que falta pra promover isto a mecanismo de deploy real -- decisão pendente, não tomada aqui
+
+Duas formas de o Flux consumir este chart, nenhuma decidida:
+
+1. **`HelmRelease` do Flux** apontando pra um `GitRepository` (ou
+   `OCIRepository`, se o chart for publicado como artefato OCI no
+   ghcr.io, mesmo registry já usado pra imagem) referenciando este repo
+   -- substituiria as duas `Kustomization`s atuais relacionadas a
+   `krewhub-central` (nota: hoje **não existe** uma `Kustomization` do
+   Flux dedicada a `krewhub-central`; achado desta fatia, ver abaixo) e
+   `kirohub-chp`.
+2. **Manter a `Kustomization` atual**, só trocando o CONTEÚDO versionado
+   de manifests brutos pelo resultado de `helm template` commitado (ou
+   um `helmCharts:` inline do próprio Kustomize) -- muda menos a
+   operação do dia a dia (segue sendo só Flux Kustomization), mas perde
+   parametrização via `values.yaml` em tempo de reconcile.
+
+**Achado colateral desta fatia, relevante pra essa decisão**: hoje
+`krewhub-central` **não tem uma Flux `Kustomization` dedicada** -- só
+existem `kirohub-chp` (path `./clusters/family-cluster/kirohub/chp`) e
+`kirohub-dev-testdev`. Os manifests de `kirohub/krewhub-central/*.yaml`
+são aplicados pela `Kustomization` **raiz** `flux-system`
+(`path: ./clusters/family-cluster`, sem `kustomization.yaml` própria
+nesse path -- o kustomize-controller gera uma implícita, achando
+TODO `.yaml` recursivamente) -- confirmado pelo label
+`kustomize.toolkit.fluxcd.io/name: flux-system` no Deployment ao vivo,
+não algo como `kirohub-krewhub-central`. Isso não é um bug urgente (está
+funcionando), mas é uma inconsistência preexistente que qualquer uma das
+duas opções acima resolveria de propósito.
+
+Sem decisão tomada aqui -- aguardando confirmação antes de qualquer
+`helm install`/`helm upgrade` ou troca da `Kustomization` vigente.
+
+### Publicado no GHCR como OCI artifact -- `oci://ghcr.io/lucasces/charts/krewhub`
+
+O chart está publicado (`helm push`, não `helm install`/`upgrade` --
+segue valendo a mesma regra: nada em produção foi tocado). Fonte de
+verdade do CÓDIGO do chart continua sendo `charts/krewhub/` neste repo
+-- o pacote no GHCR é só uma distribuição versionada e imutável dele
+(cada `helm push` de uma versão nova exige um `version:` novo em
+`Chart.yaml`; sobrescrever uma tag já publicada não é o fluxo normal do
+OCI, e o GHCR trata cada tag como conteúdo imutável).
+
+**Versão publicada**: `0.1.0` -- decisão: mantive o default do `helm
+create` como primeira versão publicada (nenhuma mudança de conteúdo
+entre "criar o chart" e "publicar", não havia motivo pra já nascer em
+`0.2.0`+). Daqui pra frente, incrementar `version:` em `Chart.yaml` a
+cada mudança de template/values antes de publicar de novo -- é
+independente de `appVersion` (que segue a tag da imagem do
+krewhub-central).
+
+**Path escolhido**: `oci://ghcr.io/lucasces/charts/krewhub` -- mesma
+conta/namespace (`lucasces`) já usada pra imagem
+(`ghcr.io/lucasces/krewhub-central`), só com um segmento `charts/` a
+mais pra não colidir no mesmo namespace de pacotes com as imagens de
+container (`helm push <pacote>.tgz oci://ghcr.io/lucasces/charts` --
+o nome final do pacote, `krewhub`, vem do `name:` em `Chart.yaml`, o
+Helm anexa automaticamente).
+
+**Login**: reaproveitado o MESMO mecanismo já usado pra imagem --
+`gh auth token | helm registry login ghcr.io -u lucasces --password-stdin`
+(equivalente ao `podman login` já documentado, só que é o próprio Helm
+quem guarda a credencial OCI, em `~/.config/helm/registry/`, não o
+Podman). Nenhuma credencial nova foi criada.
+
+**Achado colateral corrigido no caminho, não relacionado ao Helm**: o
+`~/.config/containers/containers.conf` escrito na fatia anterior (smoke
+em cluster efêmero, pra resolver `qemu-img`/`gvproxy`/`virtiofsd`
+ausentes do `podman machine`) tinha sobrescrito `helper_binaries_dir`
+de um jeito que quebrou o `podman` normal (`netavark` -- o backend de
+rede -- deixou de ser encontrado, `podman login`/qualquer comando que
+inicializa rede parava com `could not find "netavark"`). Corrigido
+adicionando os paths de `netavark`/`aardvark-dns` (resolvidos via `nix
+build`, mesmo mecanismo já usado) à mesma lista, sem remover as entradas
+da fatia anterior -- `podman` (login/build/push de imagem) e `podman
+machine` (smoke-test) continuam funcionando os dois.
+
+**Publicado privado por padrão** -- mesma limitação já documentada pra
+`krewhub-central` (troca de visibilidade via API do GitHub pra pacotes
+de conta pessoal): `gh api /user/packages?package_type=container`
+mostra `charts/krewhub` como `private`, ao lado de `krewhub-central`
+(também `private`). Não tentei nenhum workaround -- é o mesmo
+comportamento padrão já aceito antes, não um bloqueio de permissão de
+push (o push em si funcionou de primeira, sem erro de permissão
+nenhum). Se precisar tornar público (ex.: alguém instalar o chart sem
+usar a conta `lucasces`), isso é feito manualmente na UI do GitHub
+(Settings do pacote `charts/krewhub`), igual já é feito/documentado pra
+`krewhub-central`.
+
+**Verificação real, não assumida**: `helm pull
+oci://ghcr.io/lucasces/charts/krewhub --version 0.1.0` numa pasta
+separada (`/tmp/helm-pull-verify`, descartada depois) devolveu o mesmo
+digest do push (`sha256:eb384972c9...`). Comparei o conteúdo extraído
+do pacote puxado contra o source deste repo:
+- `values.yaml`, `templates/`, `examples/` -- **diff vazio, byte a
+  byte idênticos**.
+- `Chart.yaml` -- única diferença é cosmética (`helm package`
+  reserializa o YAML, remove comentários, reordena campos) -- mesmo
+  conteúdo semântico (`name`/`version`/`appVersion`/`description`
+  idênticos).
+- **`helm template` rodado a partir do pacote puxado do GHCR e a partir
+  do source local, com os MESMOS values (`examples/values-family-cluster.yaml`),
+  produziu saída IDÊNTICA** (`diff` vazio) -- a prova mais forte de
+  integridade: o que está publicado é exatamente o que está no repo,
+  não uma versão divergente.
+
+### Correção aplicada: `examples/` (config específica do homelab) viajava dentro do `.tgz` publicado -- republicado
+
+A verificação acima (`values.yaml`/`templates/`/`examples/` idênticos)
+provou integridade de publicação, mas não pegou um problema
+DIFERENTE: o `.helmignore` gerado pelo `helm create` (nunca editado até
+agora) não excluía `examples/` -- `helm package` empacota TUDO dentro
+da pasta do chart por padrão, então `examples/values-family-cluster.yaml`
+(valores reais do homelab `galaxy-far-far-away`: `rook-cephfs`,
+`krewhub.kiro.internal`, `ghcr-pull`, nomes reais dos três Secrets)
+**viajou dentro da versão `0.1.0` publicada originalmente**
+(`sha256:eb384972c9...`). Confirmado com evidência antes de corrigir:
+
+```
+$ tar tzf krewhub-0.1.0.tgz   # ANTES da correção
+krewhub/Chart.yaml
+krewhub/values.yaml
+...
+krewhub/examples/values-family-cluster.yaml   # <- não deveria estar aqui
+```
+
+Nada nesse arquivo é segredo real (é só nomes de Secret/StorageClass/
+domínio, não os valores dos segredos em si -- ver seção anterior sobre
+nome-do-Secret-vs-valor-do-Secret), mas ainda assim é config específica
+de UM ambiente vazando dentro de um artefato que deveria ser
+100% genérico.
+
+**Correção**: adicionada a linha `examples/` ao
+`charts/krewhub/.helmignore` (arquivo do scaffold `helm create`, só
+tinha os padrões default de VCS/IDE/backup -- nunca tinha uma entrada
+pra isso). Reempacotado e **republicado na MESMA tag `0.1.0`**
+(decisão: como a versão tinha acabado de ser publicada, minutos antes,
+sem ninguém dependendo dela ainda, sobrescrever a tag é mais limpo que
+inflar pra `0.1.1` por causa de um erro de empacotamento -- o GHCR
+aceitou o overwrite sem exigir nada especial). Digest mudou de
+`sha256:eb384972c9...` pra `sha256:80c9270c50...`, confirmando que o
+conteúdo publicado agora é outro.
+
+**Reverificado do zero, contra o pacote JÁ CORRIGIDO no GHCR** (não só
+localmente):
+```
+$ helm pull oci://ghcr.io/lucasces/charts/krewhub --version 0.1.0
+Pulled: ghcr.io/lucasces/charts/krewhub:0.1.0
+Digest: sha256:80c9270c505a2324666babf2ca61f376c3d6f7441a1e1e663a29518e88d9573b
+
+$ tar tzf krewhub-0.1.0.tgz
+krewhub/Chart.yaml
+krewhub/values.yaml
+krewhub/templates/NOTES.txt
+krewhub/templates/_helpers.tpl
+krewhub/templates/chp-deployment.yaml
+krewhub/templates/chp-service.yaml
+krewhub/templates/clusterrole.yaml
+krewhub/templates/clusterrolebinding.yaml
+krewhub/templates/deployment.yaml
+krewhub/templates/dev-namespace.yaml
+krewhub/templates/pvc.yaml
+krewhub/templates/service.yaml
+krewhub/templates/serviceaccount.yaml
+krewhub/.helmignore
+# examples/ -- AUSENTE, confirmado
+```
+
+Grep por qualquer valor específico de homelab dentro do conteúdo real
+do pacote republicado (`grep -rniE "kiro\.internal|rook-cephfs|galaxy-far-far-away|ghcr-pull|krewhub-oidc|chp-admin-token|coruscant|tatooine" krewhub/`,
+rodado no pacote extraído): as únicas ocorrências restantes são 7
+linhas de COMENTÁRIO dentro de `values.yaml`, todas explicitamente
+rotuladas `# Exemplo usado no homelab...` -- nenhuma delas é um valor
+efetivamente SETADO. Confirmado também parseando o `values.yaml`
+publicado com `yaml.safe_load`: `storageClassName`, `selfHost`,
+`imagePullSecretName` são todos `""`, `affinity`/`nodeSelector` são
+`{}`, `tolerations` é `[]` -- os defaults reais são genéricos de
+verdade, só a documentação em comentário cita o homelab como exemplo.
+**Deixei essas 7 linhas de comentário como estão** (são documentação
+explicitamente rotulada como exemplo, não config vazando) -- se
+preferir que nem isso apareça, é um ajuste rápido a pedir.
+
+Confirmação final, direto do artefato corrigido no GHCR: `helm template`
+sem nenhum override continua falhando com o mesmo erro de `required()`
+de antes -- prova de que o pacote é o chart genérico de verdade, não
+uma versão com atalho do homelab embutido.
+
+### Segunda correção: mesmo os COMENTÁRIOS mencionando o homelab foram removidos -- zero referência, nem em texto
+
+Decisão do Lucas sobre o ponto que eu tinha deixado em aberto acima: as
+7 linhas de comentário em `values.yaml` (`# Exemplo usado no homelab
+galaxy-far-far-away...`) e uma linha adicional que eu não tinha
+verificado (`templates/clusterrole.yaml`, um comentário citando o path
+literal `clusters/family-cluster/kirohub/krewhub-central/clusterrole.yaml`
+do repo GitOps) também tinham que sumir -- zero referência ao homelab
+no pacote publicado, nem em texto/documentação.
+
+**Linha do tempo completa desta fatia** (as duas rodadas de correção,
+nenhuma omitida):
+
+1. Publicação original (`0.1.0`, digest `sha256:eb384972c9...`): o
+   arquivo INTEIRO `examples/values-family-cluster.yaml` viajava dentro
+   do `.tgz` (achado da 1ª correção, ver seção acima).
+2. 1ª correção (`0.1.0`, digest `sha256:80c9270c50...`): adicionado
+   `examples/` ao `.helmignore`, republicado -- arquivo inteiro
+   removido, mas restaram 7 linhas de COMENTÁRIO em `values.yaml`
+   citando o homelab como "exemplo" (não eram valores setados, só
+   documentação).
+3. 2ª correção (esta, `0.1.0`, digest `sha256:9aa8f011bd...`): reescrevi
+   as 7 linhas de comentário em `values.yaml` pra genéricas (ex.
+   `selfHost: krewhub.seu-dominio.example` em vez de
+   `krewhub.kiro.internal`; `storageClassName: minha-storage-class` em
+   vez de `rook-cephfs`) -- SEM citar nenhum nome real de ambiente. Achei
+   e corrigi também um comentário em `templates/clusterrole.yaml` que
+   citava o path literal do GitOps (`clusters/family-cluster/kirohub/...`),
+   não pego pelo grep da 1ª correção porque a lista de termos usada
+   antes não incluía `family-cluster`/`kirohub` sozinhos.
+
+**Verificação exaustiva desta 2ª correção**, mesmo procedimento de
+antes (local -> package -> push -> pull de volta -> grep no artefato
+REALMENTE publicado, não só local), com a lista de termos ampliada
+(`family-cluster`, `kirohub` adicionados, além dos já usados):
+
+```
+$ helm pull oci://ghcr.io/lucasces/charts/krewhub --version 0.1.0
+Pulled: ghcr.io/lucasces/charts/krewhub:0.1.0
+Digest: sha256:9aa8f011bd8eed7bf88b8c18e4317a77475a7538f123dc62c4bc3a1ee3ca0810
+
+$ grep -rniE "kiro\.internal|rook-cephfs|galaxy-far-far-away|ghcr-pull|krewhub-oidc|chp-admin-token|coruscant|tatooine|family-cluster|kirohub" krewhub/
+ZERO ocorrências -- OK
+
+$ helm template krewhub ./krewhub --namespace kirohub    # sem override
+Error: execution error at (krewhub/templates/chp-deployment.yaml:62:27):
+  chp.adminToken.existingSecretName é obrigatório quando chp.enabled=true...
+```
+
+**Zero ocorrência confirmada de verdade no artefato publicado** -- nem
+arquivo, nem valor, nem comentário/texto. O chart segue rodando/lintando
+normal (`helm lint`/`helm template -f examples/values-family-cluster.yaml`
+localmente, sem regressão) -- só a documentação em comentário deixou de
+citar o ambiente real, os exemplos continuam existindo, só genéricos.
+
+### Como instalar direto do GHCR
+
+```bash
+# Descobrir versões publicadas
+helm show chart oci://ghcr.io/lucasces/charts/krewhub --version 0.1.0
+
+# Instalar (exemplo -- sempre passe SEUS próprios values, o default do
+# chart é genérico de propósito, ver seções acima)
+helm install krewhub oci://ghcr.io/lucasces/charts/krewhub \
+  --version 0.1.0 \
+  --namespace kirohub --create-namespace \
+  -f seus-values.yaml
+
+# Ou só renderizar/inspecionar sem instalar
+helm template krewhub oci://ghcr.io/lucasces/charts/krewhub \
+  --version 0.1.0 -f seus-values.yaml
+```
+
+Lembrete que já vale pro chart local também: os Secrets referenciados
+em `seus-values.yaml` (`chp.adminToken.existingSecretName` --
+obrigatório -- e `krewhubCentral.oidc.existingSecretName`, opcional)
+precisam já existir no cluster/namespace ANTES do `helm install` -- ver
+seção "Confirmação explícita... nome do Secret vs. valor do Secret"
+acima.
+
 ## Fora de escopo desta fatia (não são bloqueios, são a próxima fatia)
 
 - Culling por inatividade (prioridade sobe -- ver achado de contenção de
@@ -1427,3 +2118,30 @@ funcionou de primeira depois de resolvido o `helper_binaries_dir`).
   estruturais do host, não como bug), ciclo completo rodado ao vivo com
   sucesso (provision -> CHP -> dashboard fake -> close -> logout ->
   cleanup) -- ver seção "Smoke-test em cluster efêmero" acima.
+- ~~Empacotamento Helm~~ -- **chart criado e validado nesta fatia**
+  (`charts/krewhub/`), `helm lint`/`helm template` sem erro, comparado
+  campo a campo contra os 9 recursos ao vivo em produção (só diff:
+  labels novos, aditivos) + `kubectl apply --dry-run=server` confirmando
+  update in-place, não recriação -- **deploy em produção NÃO foi
+  trocado** (segue via GitOps/Flux normal); promover a chart real
+  (`HelmRelease` vs. manter `Kustomization`) é decisão pendente, não
+  tomada -- ver seção "Empacotamento Helm" acima.
+- ~~Publicação do chart no GHCR~~ -- **publicado nesta fatia** como OCI
+  artifact (`oci://ghcr.io/lucasces/charts/krewhub`, versão `0.1.0`,
+  mesmo login já usado pra imagem) -- verificado com `helm pull` numa
+  pasta separada + `helm template` do pacote puxado idêntico ao do
+  source (diff vazio). Publicado privado por padrão (mesma limitação já
+  aceita pro `krewhub-central`). Nenhum `helm install`/`upgrade` em
+  produção -- ver seção "Publicado no GHCR" acima.
+- ~~Settings do template pod-por-dev não configuráveis pelo chart
+  (`storageClass`/`baseDomain`/`kirocrewImage`/CHP namespace-porta) +
+  overlay JSON Patch sem via de configuração pelo chart~~ -- **fechado
+  nesta fatia** (chart `0.1.1`): `krewhubCentral.devPodTemplate.*` +
+  `krewhubCentral.devPodOverlay` (`ConfigMap` opcional), 100% aditivo,
+  `helm lint`/`helm template` revalidados sem regressão no homelab (só
+  diff: `KREWHUB_CHP_NAMESPACE` novo, correção deliberada, + bump de
+  versão/imagem) -- ver seção "Template do pod-por-dev configurável via
+  `values.yaml`" acima. Chart **NÃO republicado** no GHCR nesta fatia
+  (só o source deste repo foi alterado/commitado) -- publicar uma nova
+  versão `0.1.1` no OCI registry fica pra quando for de fato promovido a
+  mecanismo de deploy (ver seção "O que falta pra promover..." acima).

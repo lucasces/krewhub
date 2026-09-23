@@ -3,8 +3,38 @@ manifests (puro, sem k8s/rede: sao so dicts Python)."""
 
 from __future__ import annotations
 
+import json
+
 from app import k8s_templates as tpl
 from app.config import Settings
+
+# Overlay equivalente exato ao nodeAffinity que antes estava hardcoded em
+# build_deployment (achado desta fatia) -- usado pra provar que o overlay
+# reproduz o comportamento antigo bit-a-bit quando configurado.
+_HOMELAB_NODE_AFFINITY_OVERLAY = {
+    "deployment": [
+        {
+            "op": "add",
+            "path": "/spec/template/spec/affinity",
+            "value": {
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [
+                            {
+                                "matchExpressions": [
+                                    {
+                                        "key": "node-role.kubernetes.io/control-plane",
+                                        "operator": "Exists",
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+    ]
+}
 
 
 def _settings(**overrides) -> Settings:
@@ -14,12 +44,15 @@ def _settings(**overrides) -> Settings:
         dev_namespace="krewhub-devs",
         base_domain="kiro.internal",
         public_port="8080",
+        dev_pod_scheme="http",
         kirocrew_image="ghcr.io/kirodotdev/kirocrew:0.6.0",
         storage_class="rook-cephfs",
         storage_size="10Gi",
         chp_namespace="kirohub",
         chp_pod_label="app=configurable-http-proxy",
         chp_admin_port=8001,
+        dev_pod_overlay_path="",
+        dev_pod_overlay_json="",
         db_path=":memory:",
         session_ttl="24h",
         oidc_issuer="",
@@ -192,3 +225,126 @@ def test_configmap_cors_origin_matches_host_and_public_port():
     host = tpl.host_for(slug, settings)
     cm = tpl.build_configmap("krewhub-devs", slug, host, settings)
     assert cm["data"]["KIROCREW_CORS_ORIGINS"] == f"http://{host}:8080"
+
+
+def test_configmap_cors_origin_omits_default_http_port():
+    """Achado real: um browser nunca inclui a porta padrao (80 pra http)
+    no header Origin. Se KIROCREW_CORS_ORIGINS incluir ":80" explicito,
+    o CSRF-origin check da lib vendored (match exato de string) nunca
+    bate com o Origin real -- 403 "CSRF check failed" mesmo com host e
+    scheme corretos. Porta 80 precisa ser omitida do valor gerado."""
+    settings = _settings(base_domain="kiro.internal", public_port="80")
+    slug = tpl.slugify("dev-a@test.local")
+    host = tpl.host_for(slug, settings)
+    cm = tpl.build_configmap("krewhub-devs", slug, host, settings)
+    assert cm["data"]["KIROCREW_CORS_ORIGINS"] == f"http://{host}"
+
+
+def test_configmap_cors_origin_default_scheme_is_http_unchanged():
+    """dev_pod_scheme default precisa reproduzir bit-a-bit o
+    comportamento de antes desta fatia (homelab, sem TLS na borda) --
+    nao pode haver regressao pra quem nunca setou KREWHUB_DEV_POD_SCHEME."""
+    settings = _settings(base_domain="kiro.internal", public_port="8080")
+    assert settings.dev_pod_scheme == "http"
+    slug = tpl.slugify("dev-a@test.local")
+    host = tpl.host_for(slug, settings)
+    cm = tpl.build_configmap("krewhub-devs", slug, host, settings)
+    assert cm["data"]["KIROCREW_CORS_ORIGINS"] == f"http://{host}:8080"
+
+
+def test_configmap_cors_origin_https_scheme_with_default_port_omits_443():
+    """Quando TLS termina na borda (Ingress/ALB) e dev_pod_scheme=https,
+    a porta publica 443 (padrao do scheme https) precisa ser OMITIDA
+    pelo mesmo motivo que 80 e omitido pra http -- o browser tambem nao
+    inclui a porta padrao https no header Origin."""
+    settings = _settings(base_domain="kiro.internal", public_port="443", dev_pod_scheme="https")
+    slug = tpl.slugify("dev-a@test.local")
+    host = tpl.host_for(slug, settings)
+    cm = tpl.build_configmap("krewhub-devs", slug, host, settings)
+    assert cm["data"]["KIROCREW_CORS_ORIGINS"] == f"https://{host}"
+
+
+def test_configmap_cors_origin_https_scheme_with_non_default_port_keeps_port():
+    settings = _settings(base_domain="kiro.internal", public_port="8443", dev_pod_scheme="https")
+    slug = tpl.slugify("dev-a@test.local")
+    host = tpl.host_for(slug, settings)
+    cm = tpl.build_configmap("krewhub-devs", slug, host, settings)
+    assert cm["data"]["KIROCREW_CORS_ORIGINS"] == f"https://{host}:8443"
+
+
+# -- Overlay JSON Patch (achado desta fatia: nodeAffinity control-plane
+# estava hardcoded em build_deployment sem via de configuracao nenhuma) --
+
+
+def test_build_deployment_without_overlay_has_no_affinity_at_all():
+    """Default seguro: sem KREWHUB_DEV_POD_OVERLAY_*, o manifest e' 100%
+    generico -- nenhum campo `affinity` no spec do pod, roda em qualquer
+    cluster k8s."""
+    settings = _settings()
+    slug = tpl.slugify("dev-a@test.local")
+    deployment = tpl.build_deployment("krewhub-devs", slug, settings)
+    assert "affinity" not in deployment["spec"]["template"]["spec"]
+
+
+def test_build_pvc_without_overlay_is_unaffected():
+    settings = _settings()
+    slug = tpl.slugify("dev-a@test.local")
+    pvc = tpl.build_pvc("krewhub-devs", slug, settings)
+    assert pvc["spec"]["storageClassName"] == "rook-cephfs"
+    assert "metadata" in pvc and pvc["metadata"]["name"] == f"kiro-workspace-{slug}"
+
+
+def test_build_deployment_overlay_reproduces_the_old_hardcoded_node_affinity():
+    """Com o overlay equivalente ao do homelab configurado, o `affinity`
+    resultante e' IDENTICO ao que antes vinha hardcoded direto no
+    Python -- prova de que a migracao pro overlay nao muda o
+    comportamento em producao quando o overlay certo e' aplicado."""
+    settings = _settings(dev_pod_overlay_json=json.dumps(_HOMELAB_NODE_AFFINITY_OVERLAY))
+    slug = tpl.slugify("dev-a@test.local")
+    deployment = tpl.build_deployment("krewhub-devs", slug, settings)
+
+    assert deployment["spec"]["template"]["spec"]["affinity"] == {
+        "nodeAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": {
+                "nodeSelectorTerms": [
+                    {
+                        "matchExpressions": [
+                            {
+                                "key": "node-role.kubernetes.io/control-plane",
+                                "operator": "Exists",
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
+    # O resto do manifest continua identico ao caso sem overlay -- o
+    # overlay so ACRESCENTA o campo `affinity`, nao toca em mais nada.
+    baseline = tpl.build_deployment("krewhub-devs", slug, _settings())
+    baseline["spec"]["template"]["spec"]["affinity"] = deployment["spec"]["template"]["spec"]["affinity"]
+    assert deployment == baseline
+
+
+def test_build_deployment_overlay_only_affects_deployment_not_pvc():
+    """Overlay com chave `deployment` nao vaza pro build_pvc -- cada
+    `build_*` so aplica os ops da sua propria chave no documento."""
+    settings = _settings(dev_pod_overlay_json=json.dumps(_HOMELAB_NODE_AFFINITY_OVERLAY))
+    slug = tpl.slugify("dev-a@test.local")
+    pvc = tpl.build_pvc("krewhub-devs", slug, settings)
+    assert pvc["spec"]["storageClassName"] == "rook-cephfs"
+    assert "affinity" not in pvc["spec"]
+
+
+def test_build_deployment_malformed_overlay_raises_clear_error_not_silent_crash():
+    """Overlay malformado (nao e' um dict {recurso: [...]}) precisa
+    falhar explicito na hora de gerar o manifest -- nunca ser ignorado
+    quieto nem estourar um erro generico sem contexto."""
+    settings = _settings(dev_pod_overlay_json="- not-a-dict-at-the-top-level")
+    slug = tpl.slugify("dev-a@test.local")
+    try:
+        tpl.build_deployment("krewhub-devs", slug, settings)
+    except ValueError as exc:
+        assert "recurso" in str(exc) or "dict" in str(exc)
+    else:
+        raise AssertionError("overlay malformado deveria levantar ValueError")

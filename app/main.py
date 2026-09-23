@@ -489,6 +489,7 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
             slug=result["slug"],
             host=result["host"],
             public_port=_settings.public_port,
+            scheme=_settings.dev_pod_scheme,
             ttl=_settings.session_ttl,
         )
         with store.connect(_settings.db_path) as conn:

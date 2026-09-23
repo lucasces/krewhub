@@ -1,0 +1,33 @@
+# Patterns to ignore when building packages.
+# This supports shell glob matching, relative path matching, and
+# negation (prefixed with !). Only one pattern per line.
+.DS_Store
+# Common VCS dirs
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+# Common backup files
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# Various IDEs
+.project
+.idea/
+*.tmproj
+.vscode/
+
+# Overrides/exemplos de um cluster específico (ex.: valores reais de um
+# ambiente concreto) -- existem pra documentar/validar o chart contra
+# aquele cluster (ver README, seção "Empacotamento Helm"), mas NÃO
+# fazem parte do artefato genérico redistribuível. `helm package`
+# empacota tudo dentro da pasta do chart por padrão, inclusive
+# subpastas -- sem esta exclusão explícita, examples/ viajaria dentro
+# do .tgz publicado no registry OCI.
+examples/
+
