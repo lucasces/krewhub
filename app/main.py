@@ -289,60 +289,114 @@ def callback(
     return redirect
 
 
-def _revoke_kirocrew_session(owner_id: str) -> str:
+def _close_dev_session(owner_id: str) -> dict:
     """Núcleo reaproveitado por `GET /close` (reporta erro pro chamador,
     via HTTP) e `GET /logout` (melhor esforço -- uma falha aqui NÃO pode
-    impedir o logout do KrewHub em si, ver `logout` abaixo): encerra de
-    verdade a sessão do dashboard `kirocrew` deste dev
-    (`session_client.revoke_session` -- `kirocrew logout` via
-    `kubectl exec`, achado documentado no README: revoga server-side
-    via bump de geração persistida, NÃO reinicia o pod, NÃO derruba o
-    processo, NÃO chama o Keycloak).
+    impedir o logout do KrewHub em si, ver `logout` abaixo).
 
-    Levanta `ValueError` se `owner_id` nunca foi provisionado (sem
-    linha no SQLite -- não sabe em qual pod/namespace agir) ou
-    `session_client.SessionError` se a revogação em si falhar -- nunca
-    finge sucesso silenciosamente; cada chamador decide como traduzir
-    isso (`/close` vira HTTP 404/502, `/logout` só loga e segue)."""
+    Mudança de design (era só revogação de token, ver README seção
+    "`/close` derruba o workload"): agora faz DUAS coisas, nesta ordem
+    deliberada --
+
+    1. Revoga a sessão do dashboard `kirocrew`
+       (`session_client.revoke_session` -- `kirocrew logout` via
+       `kubectl exec`, bump de um contador de geração persistido em
+       DISCO/PVC). MELHOR ESFORÇO aqui, sempre -- se o pod já não
+       responder (ou qualquer outro `SessionError`), só loga e SEGUE pro
+       teardown, nunca bloqueia. Motivo de ainda tentar revogar mesmo
+       indo derrubar o Pod agora: o contador de geração é
+       persistido no MESMO PVC que sobrevive ao teardown abaixo -- então
+       um link/token já emitido antes deste `/close` continua rejeitado
+       mesmo depois de um `/provision` futuro reconstruir o pod com o
+       MESMO volume (a geração não é resetada, só lida de novo no boot).
+       Sem essa chamada, o teardown por si só NÃO invalidaria um link
+       antigo -- ele voltaria a funcionar no próximo provision.
+    2. Derruba o workload em si (`k8s_manager.teardown_dev_workload`):
+       Pod + Service + NetworkPolicy + ConfigMap deletados,
+       PVC + Secret preservados de propósito. Esta parte NÃO é melhor
+       esforço -- é a ação principal do endpoint agora, uma falha real
+       (não-404) propaga como `k8s_manager.TeardownError`.
+
+    Levanta `ValueError` se `owner_id` nunca foi provisionado (sem linha
+    no SQLite -- não sabe em qual namespace/slug agir). Após o teardown,
+    atualiza o registro no SQLite pra `status="closed"` -- reaproveita
+    `store.upsert` (só sobrescreve namespace/host/status/detail, NUNCA
+    `login_mode`/`login_identity_provider`/`login_region`), sem apagar a
+    linha -- é o que deixa o próximo `/provision`/`/open`/`/lobby`
+    reautenticar rápido, sem refazer OIDC nem o form do lobby."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
         raise ValueError(f"owner_id={owner_id!r} não provisionado")
 
     c = k8s_manager.get_clients(_settings)
-    return session_client.revoke_session(c, namespace=row["namespace"], slug=row["slug"])
+
+    revoked = False
+    try:
+        session_client.revoke_session(c, namespace=row["namespace"], slug=row["slug"])
+        revoked = True
+    except session_client.SessionError as exc:
+        logger.warning(
+            "revogação do kirocrew falhou pra owner_id=%s -- seguindo com o teardown mesmo assim: %s",
+            owner_id, exc,
+        )
+
+    teardown_result = k8s_manager.teardown_dev_workload(c, namespace=row["namespace"], slug=row["slug"])
+
+    with store.connect(_settings.db_path) as conn:
+        store.upsert(
+            conn,
+            owner_id=owner_id,
+            slug=row["slug"],
+            namespace=row["namespace"],
+            host=row["host"],
+            status="closed",
+            detail=str(teardown_result["steps"]),
+        )
+
+    return {"revoked": revoked, "teardown": teardown_result}
 
 
 @app.get("/close", response_class=HTMLResponse)
 def close_session(owner_id: str = Depends(require_session)) -> HTMLResponse:
-    """Encerra SÓ a sessão de trabalho do dashboard `kirocrew` deste dev
-    -- diferente de `/logout`: NÃO limpa o cookie `krewhub_session`
-    (o dev continua "logado" no KrewHub) e NÃO chama o Keycloak. Exige
-    sessão KrewHub válida (`require_session` -- reaproveitada, não
-    duplicada) pra saber QUAL owner_id fechar; `owner_id` vem sempre do
-    PRÓPRIO cookie/token, nunca de query param/URL.
+    """Desliga o workload k8s deste dev -- Pod, Service,
+    NetworkPolicy e ConfigMap deletados (workspace/histórico/login do
+    kiro-cli sobrevivem no PVC, que NÃO é tocado, ver `_close_dev_session`).
+    Mudança de design deliberada: antes só revogava um token/cookie do
+    dashboard sem afetar nenhum recurso k8s -- confuso, "Fechar sessão"
+    parecia só invalidar um link. Agora é realmente um culling manual,
+    por-dev, sob demanda. Diferente de `/logout`: NÃO limpa o cookie
+    `krewhub_session` (o dev continua "logado" no KrewHub) e NÃO chama o
+    Keycloak. Exige sessão KrewHub válida (`require_session` --
+    reaproveitada, não duplicada) pra saber QUAL owner_id fechar;
+    `owner_id` vem sempre do PRÓPRIO cookie/token, nunca de query
+    param/URL.
 
     Depois de fechada, o link de volta é pro lobby -- que, já tendo
-    `login_mode` salvo (ver `GET /lobby`), reautentica rápido emitindo
-    um `kirocrew token` novo, sem precisar refazer o ciclo OIDC."""
+    `login_mode` salvo (ver `GET /lobby`), reconcilia o workload do zero
+    (idempotente, mesmo PVC) e reautentica rápido, sem precisar refazer
+    o ciclo OIDC nem o `kiro-cli login`."""
     try:
-        _revoke_kirocrew_session(owner_id)
+        _close_dev_session(owner_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except session_client.SessionError as exc:
-        raise HTTPException(status_code=502, detail=f"revogação da sessão do kirocrew falhou: {exc}") from exc
+    except k8s_manager.TeardownError as exc:
+        raise HTTPException(status_code=502, detail=f"desligar o workload falhou: {exc}") from exc
 
     owner_id_html = html.escape(owner_id)
     return HTMLResponse(f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- sessão encerrada</title></head>
 <body style="font-family: sans-serif; max-width: 640px; margin: 2rem auto;">
-  <h1>Sessão de trabalho encerrada</h1>
-  <p>A sessão do dashboard Kiro Crew de <code>{owner_id_html}</code> foi
-  encerrada -- os links antigos do dashboard não funcionam mais. Você
-  continua logado no KrewHub.</p>
-  <p><a href="/devs/{owner_id_html}/lobby">Voltar ao lobby</a> (gera um
-  acesso novo ao dashboard automaticamente).</p>
+  <h1>Workload encerrado</h1>
+  <p>O pod do Kiro Crew de <code>{owner_id_html}</code> foi DESLIGADO --
+  Pod, Service, NetworkPolicy e ConfigMap desse dev foram
+  removidos do cluster (não é só um link/token invalidado como antes).
+  Seu workspace, histórico e login do kiro-cli continuam intactos --
+  ficam no volume persistente, que não foi tocado. Você continua logado
+  no KrewHub.</p>
+  <p><a href="/devs/{owner_id_html}/lobby">Voltar ao lobby</a> (reconstrói
+  o pod do zero automaticamente, com o mesmo workspace).</p>
 </body>
 </html>""")
 
@@ -351,28 +405,33 @@ def close_session(owner_id: str = Depends(require_session)) -> HTMLResponse:
 def logout(request: Request) -> RedirectResponse:
     """Desloga de TUDO no KrewHub -- diferente de `/close`: além de
     limpar o cookie LOCAL do KrewHub (`krewhub_session`) e redirecionar
-    pro `/login`, também encerra a sessão real do dashboard `kirocrew`
-    deste dev (mesmo núcleo que `/close` usa, `_revoke_kirocrew_session`
-    -- não duplica a lógica). Não invalida nem revoga nada do lado do
-    IdP (Keycloak): o próximo `/login` simplesmente começa um ciclo OIDC
-    novo do zero, decisão deliberada (ver README).
+    pro `/login`, também faz TUDO que `/close` faz (mesmo núcleo,
+    `_close_dev_session` -- não duplica a lógica): revoga a sessão do
+    dashboard `kirocrew` (melhor esforço) e desliga o workload k8s
+    (Pod/Service/NetworkPolicy/ConfigMap, preservando PVC/Secret).
+    Não invalida nem revoga nada do lado do IdP (Keycloak): o próximo
+    `/login` simplesmente começa um ciclo OIDC novo do zero, decisão
+    deliberada (ver README).
 
-    A revogação do `kirocrew` é MELHOR ESFORÇO aqui -- se falhar (owner
-    nunca provisionado, pod indisponível, etc.) o logout do KrewHub em
-    si (limpar cookie + redirect) segue acontecendo do mesmo jeito,
-    mantendo a garantia já testada de `/logout` nunca vazar erro.
+    TUDO que `_close_dev_session` faz é MELHOR ESFORÇO aqui -- diferente
+    de `/close` (onde uma falha REAL de teardown vira 502), uma falha
+    aqui (owner nunca provisionado, revogação ou teardown indisponível,
+    etc.) NÃO pode impedir o logout do KrewHub em si (limpar cookie +
+    redirect) -- mantém a garantia já testada de `/logout` nunca vazar
+    erro.
 
-    `GET` simples, não `POST`/form -- a ação só afeta a sessão de QUEM
-    chamou (não muda estado de outro owner_id, não expõe nada que um
-    CSRF ganhasse lendo a resposta), risco de CSRF irrelevante aqui: na
-    pior hipótese um 3rd-party força o próprio dev a deslogar a si mesmo,
-    que só cai no /login de novo.
+    `GET` simples, não `POST`/form -- a ação só afeta a sessão/workload
+    de QUEM chamou (não muda estado de outro owner_id, não expõe nada
+    que um CSRF ganhasse lendo a resposta), risco de CSRF irrelevante
+    aqui: na pior hipótese um 3rd-party força o próprio dev a deslogar
+    (e desligar o próprio pod) a si mesmo, que só cai no /login de novo
+    e reconstrói tudo no próximo /lobby.
 
     Idempotente -- mesmo `Set-Cookie` de limpeza e mesmo redirect com ou
     sem cookie presente, cookie expirado, ou assinatura inválida; nunca
     passa pelo `AuthTokenError`/`require_owner` (não precisa saber QUEM
     é a sessão pra limpar o cookie -- só precisa saber, quando dá, pra
-    tentar a revogação do kirocrew também)."""
+    tentar a revogação/teardown também)."""
     token = _extract_token(request)
     if token:
         try:
@@ -381,10 +440,10 @@ def logout(request: Request) -> RedirectResponse:
             owner_id = None
         if owner_id:
             try:
-                _revoke_kirocrew_session(owner_id)
-            except (ValueError, session_client.SessionError):
+                _close_dev_session(owner_id)
+            except (ValueError, k8s_manager.TeardownError):
                 logger.warning(
-                    "revogação do kirocrew falhou no /logout pra owner_id=%s", owner_id, exc_info=True
+                    "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
                 )
 
     redirect = RedirectResponse("/login", status_code=302)
@@ -547,29 +606,26 @@ def new_session(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
 
 @app.get("/devs/{owner_id}/open")
 def open_dashboard(owner_id: str) -> RedirectResponse:
-    """Entrypoint pensado pra ser aberto direto no navegador: emite um
-    token novo e devolve HTTP 302 pra URL já autenticada -- simula "login
-    real completou, caiu no dashboard" sem passo manual no meio."""
+    """Entrypoint pensado pra ser aberto direto no navegador: reconcilia
+    o workload (idempotente, `_do_provision` -- rápido quando o pod já
+    existe) e devolve HTTP 302 pra URL já autenticada -- simula "login
+    real completou, caiu no dashboard" sem passo manual no meio.
+
+    Reconciliar aqui (em vez de só emitir token contra o que já existir)
+    passou a importar depois de `/close`/`/logout` desligarem o workload
+    de verdade (ver README): sem isso, um `/open` batido depois de um
+    `/close` anterior (ex.: link salvo/favoritado) falharia com 502
+    ("nenhum pod Running") em vez de reconstruir o pod do zero -- mesma
+    garantia que `/provision`/`/lobby` já davam."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
-    c = k8s_manager.get_clients(_settings)
-    try:
-        url = session_client.issue_token_url(
-            c,
-            namespace=row["namespace"],
-            slug=row["slug"],
-            host=row["host"],
-            public_port=_settings.public_port,
-            ttl=_settings.session_ttl,
-        )
-    except session_client.SessionError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    with store.connect(_settings.db_path) as conn:
-        store.mark_token_issued(conn, owner_id)
+    result = _do_provision(owner_id, wait=True)
+    url = result.get("dashboard_url_with_token")
+    if not url:
+        raise HTTPException(status_code=502, detail="emissão de token falhou -- ver logs do serviço")
 
     return RedirectResponse(url, status_code=302)
 
@@ -733,24 +789,28 @@ def _lobby_result_html(
     # Links discretos: "Reconfigurar sessão" pra quem quer trocar org/modo
     # manualmente sem apagar o registro no banco (`?reconfigure=1` faz o
     # GET mostrar o form de novo, ver `lobby_form`); "Fechar sessão"
-    # (`/close`) encerra só o dashboard, mantendo o dev logado no
+    # (`/close`) desliga o pod (workload k8s), mantendo o dev logado no
     # KrewHub; "Sair" (`/logout`) desloga de tudo (cookie do KrewHub +
-    # sessão do kirocrew). Texto curto explicando a diferença -- os dois
-    # nomes sozinhos ("fechar" vs "sair") não deixam óbvio o que cada um
-    # realmente faz do lado do servidor.
+    # workload) e ainda desliga o pod. Texto curto explicando a diferença
+    # -- os dois nomes sozinhos ("fechar" vs "sair") não deixam óbvio que
+    # os DOIS agora desligam infraestrutura de verdade (Pod/
+    # Service/NetworkPolicy/ConfigMap), não só invalidam um link -- essa
+    # é a mudança de design desta fatia (ver README).
     session_links_html = (
         f'<p style="margin-top:2rem">'
         f'<a href="/devs/{owner_id_html}/lobby?reconfigure=1" style="font-size:0.85em;color:#666">'
         "Reconfigurar sessão</a>"
         ' &nbsp;|&nbsp; '
-        '<a href="/close" style="font-size:0.85em;color:#666">Fechar sessão</a>'
+        '<a href="/close" style="font-size:0.85em;color:#666">Fechar sessão (desliga o pod)</a>'
         ' &nbsp;|&nbsp; '
         '<a href="/logout" style="font-size:0.85em;color:#666">Sair</a>'
         "</p>"
         '<p style="font-size:0.8em;color:#999">'
-        '"Fechar sessão" encerra só o dashboard do Kiro Crew -- você continua '
-        'logado no KrewHub. "Sair" desloga de tudo no KrewHub (e também encerra '
-        "o dashboard)."
+        '"Fechar sessão" DESLIGA o pod do Kiro Crew (Pod/Service/rede '
+        'removidos do cluster) -- seu workspace e histórico continuam salvos, '
+        'o próximo acesso reconstrói tudo automaticamente; você continua '
+        'logado no KrewHub. "Sair" faz o mesmo e ainda desloga de tudo no '
+        "KrewHub."
         "</p>"
     )
 

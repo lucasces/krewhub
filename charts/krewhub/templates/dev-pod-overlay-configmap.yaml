@@ -4,8 +4,15 @@
 # pod-por-dev (ver app/overlay.py no repo krewhub -- mecanismo que
 # substituiu o nodeAffinity hardcoded que existia antes). Documento
 # {recurso: [operações]}, uma chave por build_* que suporta overlay hoje
-# (deployment, pvc) -- ver krewhubCentral.devPodOverlay em values.yaml
-# pro formato exato e um exemplo genérico.
+# (pod, pvc) -- ver krewhubCentral.devPodOverlay em values.yaml pro
+# formato exato e um exemplo genérico. BREAKING CHANGE (ver README,
+# seção "Deployment vs Pod puro pro workload por-dev"): a chave era
+# `deployment` antes da migração de Deployment pra Pod puro -- um
+# overlay antigo com `deployment:` é silenciosamente IGNORADO pelo
+# código novo (só lê `pod:`), gerando um Pod sem a afinidade/
+# tolerations configuradas. Renomeie pra `pod:` e ajuste os paths de
+# `/spec/template/spec/...` pra `/spec/...` (Pod não tem o wrapper
+# PodTemplateSpec que Deployment tinha).
 #
 # Só existe (este ConfigMap todo é omitido, default) se
 # krewhubCentral.devPodOverlay vier preenchido -- ver

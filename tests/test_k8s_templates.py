@@ -9,13 +9,16 @@ from app import k8s_templates as tpl
 from app.config import Settings
 
 # Overlay equivalente exato ao nodeAffinity que antes estava hardcoded em
-# build_deployment (achado desta fatia) -- usado pra provar que o overlay
-# reproduz o comportamento antigo bit-a-bit quando configurado.
+# build_deployment, hoje build_pod (achado de uma fatia anterior) -- usado
+# pra provar que o overlay reproduz o comportamento antigo bit-a-bit
+# quando configurado. Path relativo a `/spec/...` direto -- migrado de
+# `/spec/template/spec/...` junto com a troca de Deployment pra Pod puro
+# (Pod nao tem o wrapper PodTemplateSpec que Deployment tinha).
 _HOMELAB_NODE_AFFINITY_OVERLAY = {
-    "deployment": [
+    "pod": [
         {
             "op": "add",
-            "path": "/spec/template/spec/affinity",
+            "path": "/spec/affinity",
             "value": {
                 "nodeAffinity": {
                     "requiredDuringSchedulingIgnoredDuringExecution": {
@@ -147,8 +150,8 @@ def test_build_resource_names_are_deterministic_by_slug():
     svc = tpl.build_service(ns, slug1)
     assert svc["metadata"]["name"] == f"kirocrew-{slug1}"
 
-    deployment = tpl.build_deployment(ns, slug1, settings)
-    assert deployment["metadata"]["name"] == f"kirocrew-{slug1}"
+    pod = tpl.build_pod(ns, slug1, settings)
+    assert pod["metadata"]["name"] == f"kirocrew-{slug1}"
 
     netpol = tpl.build_networkpolicy(ns, slug1, settings)
     assert netpol["metadata"]["name"] == f"allow-chp-to-dashboard-only-{slug1}"
@@ -206,16 +209,16 @@ def test_networkpolicy_selector_never_matches_a_different_dev():
     assert netpol_a["spec"]["podSelector"]["matchLabels"][tpl.OWNER_LABEL_KEY] != slug_b
 
 
-def test_deployment_and_service_share_the_same_owner_slug_label():
-    """Service seleciona o Deployment certo (mesmo owner-slug label) --
+def test_pod_and_service_share_the_same_owner_slug_label():
+    """Service seleciona o Pod certo (mesmo owner-slug label) --
     sem isso o Service de um dev poderia rotear pro pod de outro no
     namespace compartilhado."""
     settings = _settings()
     slug = tpl.slugify("dev-a@test.local")
-    deployment = tpl.build_deployment("krewhub-devs", slug, settings)
+    pod = tpl.build_pod("krewhub-devs", slug, settings)
     service = tpl.build_service("krewhub-devs", slug)
 
-    pod_labels = deployment["spec"]["template"]["metadata"]["labels"]
+    pod_labels = pod["metadata"]["labels"]
     assert service["spec"]["selector"] == pod_labels
 
 
@@ -276,14 +279,14 @@ def test_configmap_cors_origin_https_scheme_with_non_default_port_keeps_port():
 # estava hardcoded em build_deployment sem via de configuracao nenhuma) --
 
 
-def test_build_deployment_without_overlay_has_no_affinity_at_all():
+def test_build_pod_without_overlay_has_no_affinity_at_all():
     """Default seguro: sem KREWHUB_DEV_POD_OVERLAY_*, o manifest e' 100%
     generico -- nenhum campo `affinity` no spec do pod, roda em qualquer
     cluster k8s."""
     settings = _settings()
     slug = tpl.slugify("dev-a@test.local")
-    deployment = tpl.build_deployment("krewhub-devs", slug, settings)
-    assert "affinity" not in deployment["spec"]["template"]["spec"]
+    pod = tpl.build_pod("krewhub-devs", slug, settings)
+    assert "affinity" not in pod["spec"]
 
 
 def test_build_pvc_without_overlay_is_unaffected():
@@ -294,16 +297,16 @@ def test_build_pvc_without_overlay_is_unaffected():
     assert "metadata" in pvc and pvc["metadata"]["name"] == f"kiro-workspace-{slug}"
 
 
-def test_build_deployment_overlay_reproduces_the_old_hardcoded_node_affinity():
+def test_build_pod_overlay_reproduces_the_old_hardcoded_node_affinity():
     """Com o overlay equivalente ao do homelab configurado, o `affinity`
     resultante e' IDENTICO ao que antes vinha hardcoded direto no
     Python -- prova de que a migracao pro overlay nao muda o
     comportamento em producao quando o overlay certo e' aplicado."""
     settings = _settings(dev_pod_overlay_json=json.dumps(_HOMELAB_NODE_AFFINITY_OVERLAY))
     slug = tpl.slugify("dev-a@test.local")
-    deployment = tpl.build_deployment("krewhub-devs", slug, settings)
+    pod = tpl.build_pod("krewhub-devs", slug, settings)
 
-    assert deployment["spec"]["template"]["spec"]["affinity"] == {
+    assert pod["spec"]["affinity"] == {
         "nodeAffinity": {
             "requiredDuringSchedulingIgnoredDuringExecution": {
                 "nodeSelectorTerms": [
@@ -321,13 +324,13 @@ def test_build_deployment_overlay_reproduces_the_old_hardcoded_node_affinity():
     }
     # O resto do manifest continua identico ao caso sem overlay -- o
     # overlay so ACRESCENTA o campo `affinity`, nao toca em mais nada.
-    baseline = tpl.build_deployment("krewhub-devs", slug, _settings())
-    baseline["spec"]["template"]["spec"]["affinity"] = deployment["spec"]["template"]["spec"]["affinity"]
-    assert deployment == baseline
+    baseline = tpl.build_pod("krewhub-devs", slug, _settings())
+    baseline["spec"]["affinity"] = pod["spec"]["affinity"]
+    assert pod == baseline
 
 
-def test_build_deployment_overlay_only_affects_deployment_not_pvc():
-    """Overlay com chave `deployment` nao vaza pro build_pvc -- cada
+def test_build_pod_overlay_only_affects_pod_not_pvc():
+    """Overlay com chave `pod` nao vaza pro build_pvc -- cada
     `build_*` so aplica os ops da sua propria chave no documento."""
     settings = _settings(dev_pod_overlay_json=json.dumps(_HOMELAB_NODE_AFFINITY_OVERLAY))
     slug = tpl.slugify("dev-a@test.local")
@@ -336,14 +339,14 @@ def test_build_deployment_overlay_only_affects_deployment_not_pvc():
     assert "affinity" not in pvc["spec"]
 
 
-def test_build_deployment_malformed_overlay_raises_clear_error_not_silent_crash():
+def test_build_pod_malformed_overlay_raises_clear_error_not_silent_crash():
     """Overlay malformado (nao e' um dict {recurso: [...]}) precisa
     falhar explicito na hora de gerar o manifest -- nunca ser ignorado
     quieto nem estourar um erro generico sem contexto."""
     settings = _settings(dev_pod_overlay_json="- not-a-dict-at-the-top-level")
     slug = tpl.slugify("dev-a@test.local")
     try:
-        tpl.build_deployment("krewhub-devs", slug, settings)
+        tpl.build_pod("krewhub-devs", slug, settings)
     except ValueError as exc:
         assert "recurso" in str(exc) or "dict" in str(exc)
     else:

@@ -30,8 +30,26 @@ hardcoded sem via de configuração nenhuma) é o nodeAffinity pro node
 control-plane que o CSI do rook-cephfs deste cluster exige -- isso agora
 é responsabilidade do overlay JSON Patch (ver app/overlay.py e
 KREWHUB_DEV_POD_OVERLAY_PATH/_JSON no README): sem overlay configurado,
-build_deployment/build_pvc geram manifest 100% genérico, sem nada
-específico de cluster nenhum -- rodam em qualquer cluster k8s."""
+build_pod/build_pvc geram manifest 100% genérico, sem nada
+específico de cluster nenhum -- rodam em qualquer cluster k8s.
+
+Mudança de arquitetura desta fatia (migração real, não só investigada --
+ver README, seção "Deployment vs Pod puro pro workload por-dev"): o
+workload por-dev deixou de ser um `Deployment` (1 réplica,
+`ReplicaSet` de tabelinha) e virou um `Pod` puro (`restartPolicy:
+Always`). Nenhum dos recursos k8s pró-réplica fazia sentido aqui -- 1
+pod = 1 dev = 1 gateway, sem scaling, sem rolling deploy de verdade
+(bump de imagem já era documentado como restart/recreate manual, nunca
+um `kubectl set image` orquestrado). `restartPolicy: Always` cobre
+exatamente o mesmo caso que o ReplicaSet cobria na prática (container
+morre, kubelet reinicia) -- a única coisa que se perde é recriação
+automática se o Pod INTEIRO for removido (delete acidental, node
+morrer): nesse caso um `Pod` puro fica removido até alguém chamar
+`reconcile_dev`/`/provision` de novo -- hoje isso já é sempre manual
+(não há nada automatizado chamando `/provision` sozinho, culling
+automático ainda não existe), então a perda é mais teórica que prática
+agora -- trade-off aceito conscientemente, documentado no README, não
+escondido."""
 
 from __future__ import annotations
 
@@ -44,7 +62,7 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 # Label que discrimina o pod de CADA dev dentro do namespace compartilhado
 # -- é o que garante que a NetworkPolicy de um dev não vaze pro pod de
-# outro dev no mesmo namespace (ver build_networkpolicy/build_deployment).
+# outro dev no mesmo namespace (ver build_networkpolicy/build_pod).
 OWNER_LABEL_KEY = "krewhub.pespa.net/owner-slug"
 
 # Porta padrao de cada scheme -- usado pra decidir quando OMITIR a porta
@@ -212,101 +230,121 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
     }
 
 
-def build_deployment(namespace: str, slug: str, settings: Settings) -> dict:
+def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
+    """Antes desta fatia, este era `build_deployment` (gerava um
+    `Deployment` de 1 réplica com `strategy: Recreate`, ver README
+    seção "Deployment vs Pod puro pro workload por-dev" pro histórico da
+    investigação e da migração real). Migrado pra `Pod` puro:
+    `spec.template.spec` do Deployment de antes virou `spec` direto (o
+    conteúdo -- containers/volumes/securityContext -- é idêntico,
+    bit-a-bit, só o nivelamento do wrapper mudou), com `restartPolicy:
+    Always` cobrindo o mesmo caso de restart de container que o
+    ReplicaSet cobria na prática pra 1 réplica sem rolling deploy.
+
+    Trade-off aceito conscientemente (documentado no README, não
+    escondido): um `Pod` puro NÃO se auto-recria se o objeto Pod
+    INTEIRO for removido (crash do node, delete acidental) -- só o
+    kubelet reiniciando o CONTAINER dentro dele continua automático.
+    Recriação nesse caso exige `reconcile_dev`/`/provision` de novo
+    (hoje sempre manual -- não há culling/chamada automatizada).
+    """
     pod_labels = {"app": "kirocrew", OWNER_LABEL_KEY: slug}
     manifest = {
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
+        "apiVersion": "v1",
+        "kind": "Pod",
         "metadata": {
             "name": f"kirocrew-{slug}",
             "namespace": namespace,
             "labels": pod_labels,
         },
         "spec": {
-            "replicas": 1,
-            "strategy": {"type": "Recreate"},
-            "selector": {"matchLabels": pod_labels},
-            "template": {
-                "metadata": {"labels": pod_labels},
-                "spec": {
-                    "securityContext": {
-                        "fsGroup": 1000,
-                        "seccompProfile": {"type": "RuntimeDefault"},
-                    },
-                    # Sem "affinity" aqui de propósito -- nenhuma restrição
-                    # de nó genérica faz sentido pra QUALQUER cluster.
-                    # Se o cluster precisar de uma (ex.: nodeAffinity pro
-                    # control-plane, exigido pelo CSI do rook-cephfs no
-                    # galaxy-far-far-away), isso entra via overlay JSON
-                    # Patch (ver app/overlay.py, aplicado no fim desta
-                    # função) -- nunca hardcoded aqui.
-                    "containers": [
-                        {
-                            "name": "kirocrew",
-                            "image": settings.kirocrew_image,
-                            "ports": [{"containerPort": 5476, "name": "dashboard"}],
-                            "envFrom": [
-                                {"configMapRef": {"name": f"kiro-config-{slug}"}}
-                            ],
-                            "env": [
-                                {
-                                    "name": "KIROCREW_OWNER_ID",
-                                    "valueFrom": {
-                                        "secretKeyRef": {
-                                            "name": f"kiro-owner-id-{slug}",
-                                            "key": "KIROCREW_OWNER_ID",
-                                        }
-                                    },
-                                },
-                                {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
-                            ],
-                            "volumeMounts": [
-                                {"name": "home", "mountPath": "/home/kirocrew"},
-                                {"name": "tmp", "mountPath": "/tmp"},
-                            ],
-                            "securityContext": {
-                                "runAsNonRoot": True,
-                                "runAsUser": 1000,
-                                "runAsGroup": 1000,
-                                "allowPrivilegeEscalation": False,
-                                "readOnlyRootFilesystem": True,
-                                "capabilities": {"drop": ["ALL"]},
-                                # Unconfined SO aqui (pod-level continua
-                                # RuntimeDefault acima) -- sandbox do Kiro
-                                # Crew precisa de unshare(CLONE_NEWUSER),
-                                # RuntimeDefault bloqueia isso.
-                                "seccompProfile": {"type": "Unconfined"},
-                            },
-                            "resources": {
-                                "requests": {"cpu": "500m", "memory": "2Gi"},
-                                "limits": {"cpu": "2", "memory": "8Gi"},
-                            },
-                            "startupProbe": {
-                                "httpGet": {"path": "/api/health", "port": 5476},
-                                "failureThreshold": 30,
-                                "periodSeconds": 10,
-                            },
-                            "readinessProbe": {
-                                "httpGet": {"path": "/api/ready", "port": 5476},
-                                "periodSeconds": 10,
-                            },
-                            "livenessProbe": {
-                                "httpGet": {"path": "/api/live", "port": 5476},
-                                "periodSeconds": 20,
-                            },
-                        }
+            # Equivalente do restart automatico que o ReplicaSet do
+            # Deployment dava pra 1 replica -- kubelet reinicia o
+            # CONTAINER (crash, OOM, probe falhando) sozinho. O que ISSO
+            # nao cobre (perdido conscientemente, ver docstring da
+            # funcao e README): o Pod inteiro sumir (delete manual, node
+            # cair) -- nesse caso ninguem recria sozinho.
+            "restartPolicy": "Always",
+            "securityContext": {
+                "fsGroup": 1000,
+                "seccompProfile": {"type": "RuntimeDefault"},
+            },
+            # Sem "affinity" aqui de propósito -- nenhuma restrição
+            # de nó genérica faz sentido pra QUALQUER cluster.
+            # Se o cluster precisar de uma (ex.: nodeAffinity pro
+            # control-plane, exigido pelo CSI do rook-cephfs no
+            # galaxy-far-far-away), isso entra via overlay JSON
+            # Patch (ver app/overlay.py, aplicado no fim desta
+            # função) -- nunca hardcoded aqui. Path do overlay agora é
+            # relativo a `/spec/...` direto (nao mais
+            # `/spec/template/spec/...` -- esse nivel so existia porque
+            # Deployment tem um PodTemplateSpec por baixo; Pod puro nao
+            # tem esse wrapper).
+            "containers": [
+                {
+                    "name": "kirocrew",
+                    "image": settings.kirocrew_image,
+                    "ports": [{"containerPort": 5476, "name": "dashboard"}],
+                    "envFrom": [
+                        {"configMapRef": {"name": f"kiro-config-{slug}"}}
                     ],
-                    "volumes": [
+                    "env": [
                         {
-                            "name": "home",
-                            "persistentVolumeClaim": {
-                                "claimName": f"kiro-workspace-{slug}"
+                            "name": "KIROCREW_OWNER_ID",
+                            "valueFrom": {
+                                "secretKeyRef": {
+                                    "name": f"kiro-owner-id-{slug}",
+                                    "key": "KIROCREW_OWNER_ID",
+                                }
                             },
                         },
-                        {"name": "tmp", "emptyDir": {}},
+                        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
                     ],
+                    "volumeMounts": [
+                        {"name": "home", "mountPath": "/home/kirocrew"},
+                        {"name": "tmp", "mountPath": "/tmp"},
+                    ],
+                    "securityContext": {
+                        "runAsNonRoot": True,
+                        "runAsUser": 1000,
+                        "runAsGroup": 1000,
+                        "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
+                        "capabilities": {"drop": ["ALL"]},
+                        # Unconfined SO aqui (pod-level continua
+                        # RuntimeDefault acima) -- sandbox do Kiro
+                        # Crew precisa de unshare(CLONE_NEWUSER),
+                        # RuntimeDefault bloqueia isso.
+                        "seccompProfile": {"type": "Unconfined"},
+                    },
+                    "resources": {
+                        "requests": {"cpu": "500m", "memory": "2Gi"},
+                        "limits": {"cpu": "2", "memory": "8Gi"},
+                    },
+                    "startupProbe": {
+                        "httpGet": {"path": "/api/health", "port": 5476},
+                        "failureThreshold": 30,
+                        "periodSeconds": 10,
+                    },
+                    "readinessProbe": {
+                        "httpGet": {"path": "/api/ready", "port": 5476},
+                        "periodSeconds": 10,
+                    },
+                    "livenessProbe": {
+                        "httpGet": {"path": "/api/live", "port": 5476},
+                        "periodSeconds": 20,
+                    },
+                }
+            ],
+            "volumes": [
+                {
+                    "name": "home",
+                    "persistentVolumeClaim": {
+                        "claimName": f"kiro-workspace-{slug}"
+                    },
                 },
-            },
+                {"name": "tmp", "emptyDir": {}},
+            ],
         },
     }
-    return apply_overlay(manifest, load_overlay_ops(settings, "deployment"))
+    return apply_overlay(manifest, load_overlay_ops(settings, "pod"))

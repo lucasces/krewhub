@@ -128,7 +128,7 @@ Config (todas opcionais, têm default seguro pra este cluster — exceto as
 | `KREWHUB_STORAGE_SIZE` | `10Gi` |
 | `KREWHUB_CHP_NAMESPACE` | `kirohub` (nome do namespace em si -- ver nota de rebrand abaixo) |
 | `KREWHUB_CHP_ADMIN_PORT` | `8001` |
-| `KREWHUB_DEV_POD_OVERLAY_PATH` | vazio -- path de um arquivo (YAML ou JSON) com overlay JSON Patch (RFC 6902) aplicado em cima do Deployment/PVC genéricos de cada dev (ver seção "Overlay JSON Patch por-cluster" abaixo). Vazio = manifest 100% genérico, sem nenhuma restrição de nó/StorageClass fixa de cluster |\n| `KREWHUB_DEV_POD_OVERLAY_JSON` | vazio -- mesmo conteúdo do `_PATH` acima, mas inline (fallback pra dev local/smoke test); `_PATH` tem precedência se os dois vierem setados |\n| `KREWHUB_DB_PATH` | `./krewhub.db` |
+| `KREWHUB_DEV_POD_OVERLAY_PATH` | vazio -- path de um arquivo (YAML ou JSON) com overlay JSON Patch (RFC 6902) aplicado em cima do Pod/PVC genéricos de cada dev (ver seção "Overlay JSON Patch por-cluster" abaixo). Vazio = manifest 100% genérico, sem nenhuma restrição de nó/StorageClass fixa de cluster |\n| `KREWHUB_DEV_POD_OVERLAY_JSON` | vazio -- mesmo conteúdo do `_PATH` acima, mas inline (fallback pra dev local/smoke test); `_PATH` tem precedência se os dois vierem setados |\n| `KREWHUB_DB_PATH` | `./krewhub.db` |
 | `KREWHUB_SESSION_TTL` | `24h` (passado a `kirocrew token --ttl`) |
 | `KREWHUB_OIDC_ISSUER`/`_CLIENT_ID`/`_CLIENT_SECRET`/`_REDIRECT_URI`/`_SCOPES` | vazio (em cluster, vem do Secret `krewhub-oidc`, ver seção "Exchange OIDC real" abaixo) |
 | `KREWHUB_SESSION_SECRET` | vazio -- segredo próprio do KrewHub pra assinar/validar o cookie/Bearer de sessão (ver seção "Autenticação dos próprios endpoints"); em cluster vem do Secret `krewhub-oidc`, chave `session-secret` |
@@ -151,11 +151,22 @@ de desligar/trocar sem editar `app/k8s_templates.py`. Diferente de
 
 **Mecanismo:** `app/overlay.py` aplica um overlay **JSON Patch (RFC
 6902)**, via a lib `jsonpatch`, em cima do manifest genérico que
-`build_deployment`/`build_pvc` geram. Cada `build_*` monta o dict
+`build_pod`/`build_pvc` geram. Cada `build_*` monta o dict
 genérico normalmente e devolve `apply_overlay(manifest,
 load_overlay_ops(settings, "<recurso>"))` -- sem overlay configurado,
 `apply_overlay` devolve o manifest intocado (100% genérico, roda em
 qualquer cluster k8s, sem afinidade nem storageClass fixa nenhuma).
+
+**BREAKING CHANGE (ver seção "Deployment vs Pod puro pro workload
+por-dev"):** a chave de topo do workload por-dev era `deployment:` até
+esta fatia (quando `build_deployment` gerava um `Deployment`) -- agora
+é `pod:` (`build_pod` gera um `Pod` puro), e os paths RFC 6902 mudaram
+de `/spec/template/spec/...` pra `/spec/...` (Pod não tem o wrapper
+PodTemplateSpec que Deployment tinha). Um overlay antigo com
+`deployment:` contra o código novo é **ignorado em silêncio** -- o Pod
+sobe sem a afinidade/tolerations configuradas, sem erro nenhum. Quem
+tiver um overlay próprio com a chave antiga precisa migrar pra `pod:` +
+ajustar os paths ao atualizar pra esta versão.
 
 **Por que JSON Patch e não strategic-merge-patch nem JSON Merge Patch
 (RFC 7396):** não existe lib Python madura que replique client-side o
@@ -173,16 +184,18 @@ YAML/JSON, tipicamente montado via ConfigMap gerenciado fora do chart
 Helm genérico -- mesmo padrão já usado pros outros recursos por-dev) ou
 `KREWHUB_DEV_POD_OVERLAY_JSON` (conteúdo inline, fallback pra dev
 local/smoke test). O arquivo/conteúdo é um dict `{recurso: [operações]}`,
-uma chave por `build_*` que suporta overlay hoje (`deployment`, `pvc`):
+uma chave por `build_*` que suporta overlay hoje (`pod`, `pvc`):
 
 ```yaml
 # Equivalente exato ao nodeAffinity que antes estava hardcoded em
-# build_deployment -- é o overlay real usado no galaxy-far-far-away
-# (ver clusters/family-cluster/kirohub/krewhub-central/dev-pod-overlay-configmap.yaml
-# no repo GitOps).
-deployment:
+# build_deployment (hoje build_pod) -- é o overlay real usado no
+# galaxy-far-far-away (ver
+# clusters/family-cluster/kirohub/krewhub-central/dev-pod-overlay-configmap.yaml
+# no repo GitOps). Path relativo a /spec direto -- Pod não tem o
+# wrapper PodTemplateSpec que Deployment tinha.
+pod:
   - op: add
-    path: /spec/template/spec/affinity
+    path: /spec/affinity
     value:
       nodeAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
@@ -199,7 +212,7 @@ um overlay que mude `storageClassName`/`accessModes` só pega em PVCs
 criados DEPOIS da mudança de overlay; num PVC já existente o apiserver
 rejeita o patch (422). Comportamento nativo do k8s, não deste mecanismo.
 
-## Testes automatizados (suíte rápida, offline -- 122 testes, ~2.2s)
+## Testes automatizados (suíte rápida, offline -- 135 testes, ~2.8s)
 
 Suíte de **regressão pra rodar antes de cada deploy** -- diferente do
 smoke-test manual documentado nas seções abaixo ("Provado ao vivo" e as
@@ -896,6 +909,73 @@ autenticando até `exp` natural. Isso é sobre o cookie do KrewHub, não
 sobre a sessão do `kirocrew` -- a distinção entre os dois é exatamente o
 que esta fatia resolve.
 
+### Mudança de design (posterior): `/close`/`/logout` passam a desligar o workload k8s, não só revogar sessão
+
+A investigação e o desenho documentados na seção acima ("dois conceitos
+diferentes") continuam válidos para a revogação de sessão do `kirocrew`
+em si -- mas a decisão final de escopo MUDOU depois: além de revogar a
+sessão, `/close` e `/logout` agora também derrubam o workload k8s do dev
+(`k8s_manager.teardown_dev_workload`, ver docstring lá) -- um culling
+manual, por-dev, sob demanda. Motivo: "Fechar sessão" só invalidando um
+token/cookie, sem afetar nenhum recurso k8s, ficava confuso -- parecia
+que devia liberar recursos do cluster e não liberava nada.
+
+Ordem de execução em `_close_dev_session` (`app/main.py`): 1) revoga a
+sessão do `kirocrew` (melhor esforço, ver seção acima); 2) deleta
+Deployment + Service + NetworkPolicy + ConfigMap do dev
+(`teardown_dev_workload`), preservando **explicitamente** o PVC
+(`kiro-workspace-<slug>`) e o Secret (`kiro-owner-id-<slug>`) -- os dois
+NUNCA aparecem no teardown, de propósito. É isso que garante que um
+`/provision` seguinte reconstrua o workload do zero de forma idempotente
+com o MESMO workspace/histórico/login do `kiro-cli`. `/close` propaga
+falha real de teardown como 502; `/logout` trata a mesma falha como
+melhor esforço (nunca impede o logout do KrewHub em si).
+
+**Achado real ao validar contra o cluster homelab (`galaxy-far-far-away`)
+depois do deploy da imagem com essa mudança:** o `ClusterRole
+krewhub-central` (`clusters/family-cluster/kirohub/krewhub-central/clusterrole.yaml`,
+GitOps) tinha sido escrito ANTES desta fatia e não tinha nenhum verbo
+`delete` (decisão documentada como correta na época: "o reconcile hoje é
+só create/patch, nunca remove nada"). Resultado: `/close`/`/logout`
+davam 502 (403 Forbidden do apiserver, `cannot delete resource
+"deployments"`) contra o cluster real, mesmo com a suíte pytest (que
+mocka o client k8s) passando 100%. Corrigido adicionando `delete`
+SOMENTE em Deployment/Service/NetworkPolicy/ConfigMap no `ClusterRole` --
+Secret e PersistentVolumeClaim continuam de propósito SEM `delete`,
+reforçando em profundidade (RBAC, não só código) a garantia de que o
+teardown nunca apaga workspace ou credencial do dev.
+
+**Testado ao vivo contra o cluster homelab depois da correção de RBAC**,
+com um owner descartável (via port-forward direto no Service
+`krewhub-central`, sessão assinada localmente com o `session-secret`
+real, sem depender do fluxo OIDC completo):
+
+```
+POST /devs/<owner-descartável>/provision?wait=true
+  -> 200, steps: secret/configmap/pvc/service/networkpolicy/deployment=created
+     PVC uid=da1ed6a9-...  Secret uid=77703784-...
+
+GET /close
+  -> 200 "Workload encerrado"
+  -> Deployment/Service/NetworkPolicy/ConfigMap: NotFound
+  -> PVC/Secret: mesmos uids de antes (intactos)
+
+POST /devs/<mesmo-owner>/provision?wait=true   (reprovision)
+  -> 200, steps: pvc=updated, secret=updated (não "created")
+     PVC/Secret: MESMOS uids de antes -- idempotência real confirmada
+  -> pod 1/1 Running
+
+GET /logout
+  -> 302 Location: /login, Set-Cookie: krewhub_session=""; Max-Age=0
+  -> Deployment/Service/NetworkPolicy/ConfigMap: NotFound de novo
+  -> PVC/Secret: mesmos uids -- preservados também no /logout
+```
+
+Owner descartável limpo depois (PVC + Secret removidos manualmente com
+credencial de cluster-admin, fora do RBAC do `krewhub-central` -- o
+próprio teste confirma que o service account da aplicação não teria
+conseguido apagar esses dois).
+
 ## Deploy no cluster (bloqueio de adoção fechado)
 
 Até esta fatia, o serviço só rodava na máquina do operador
@@ -941,11 +1021,16 @@ por precisar de namespaces dinâmicos. Permissões são só o que
 por grep, não uma lista aspiracional): `namespaces`
 (**`get/list/watch` só -- SEM `create`/`patch`/`update`**, achado desta
 fatia: sobrava, o reconcile só confirma que o namespace compartilhado já
-existe), `secrets`, `configmaps`, `services`, `persistentvolumeclaims`,
-`deployments`(+`status`), `networkpolicies`
-(`get/list/watch/create/patch/update`, **sem `delete`** -- o reconcile é
-só create-ou-patch hoje) e `pods`(`get/list/watch`) +
-`pods/exec`(`get`,`create`). **Achado ao vivo, não óbvio:** o client
+existe), `secrets`/`persistentvolumeclaims` (`get/list/watch/create/
+patch/update`, **sem `delete`** -- `teardown_dev_workload` nunca apaga
+nenhum dos dois, de propósito), `configmaps`/`services`/`pods`
+(`get/list/watch/create/patch/update/delete` -- `pods` migrou de
+`deployments` nesta fatia, ver seção "Deployment vs Pod puro pro
+workload por-dev": o workload por-dev virou um `Pod` puro em vez de
+`Deployment`, então o RBAC de create/patch/update/delete foi junto) +
+`pods/exec`(`get`,`create`), `networkpolicies`
+(`get/list/watch/create/patch/update/delete`). **Achado ao vivo, não
+óbvio:** o client
 Python (`connect_get_namespaced_pod_exec`) emite a requisição de exec
 como **HTTP GET** com upgrade pra websocket -- o apiserver valida RBAC
 contra o verbo HTTP real da chamada, não contra a convenção usual
@@ -1065,10 +1150,10 @@ passam a compartilhar UM único namespace**.
 - **Nomes de recurso levam o slug do dev** pra coexistir no mesmo
   namespace sem colidir: `kiro-owner-id-<slug>` (Secret),
   `kiro-config-<slug>` (ConfigMap), `kiro-workspace-<slug>` (PVC),
-  `kirocrew-<slug>` (Service + Deployment),
+  `kirocrew-<slug>` (Service + Pod),
   `allow-chp-to-dashboard-only-<slug>` (NetworkPolicy).
 - **Ponto crítico de segurança -- isolamento de rede não depende mais da
-  fronteira do namespace.** Deployment/Service/NetworkPolicy de cada dev
+  fronteira do namespace.** Pod/Service/NetworkPolicy de cada dev
   levam a label `krewhub.pespa.net/owner-slug: <slug>` nos pods; a
   `NetworkPolicy` de cada dev usa um `podSelector`
   (`app=kirocrew,krewhub.pespa.net/owner-slug=<slug>`) que seleciona **só
@@ -2092,6 +2177,104 @@ obrigatório -- e `krewhubCentral.oidc.existingSecretName`, opcional)
 precisam já existir no cluster/namespace ANTES do `helm install` -- ver
 seção "Confirmação explícita... nome do Secret vs. valor do Secret"
 acima.
+
+## Deployment vs Pod puro pro workload por-dev (migração aplicada)
+
+**Histórico:** uma investigação anterior levantou esta mesma pergunta --
+já que cada dev tem só 1 réplica (`replicas: 1`) e `/close`/`/logout` já
+fazem o culling manual (não depende de crash-loop pra "reiniciar"), o
+`Deployment` (`kirocrew-<slug>`) ainda se justifica, ou um `Pod` puro
+(`restartPolicy: Always`) resolveria com menos objeto no cluster? --
+mas concluiu "não migrar", com a justificativa central de que a chave
+`deployment:` do overlay JSON Patch "já está em produção em dois
+clusters, trocar quebra os dois". Avaliado de novo com o Lucas: essa
+justificativa era **fraca** -- um rename mecânico coordenado (trocar
+`deployment:` -> `pod:` e o path do patch nos dois overlays, no MESMO
+commit conceitual que o código novo) não é um bloqueio real de
+arquitetura, só trabalho de coordenação. **Migrado de verdade nesta
+fatia.**
+
+**Por que migrar:** nenhum dos recursos k8s pró-réplica que um
+`Deployment`/`ReplicaSet` existe pra suportar fazia sentido aqui -- 1
+pod = 1 dev = 1 gateway, sem scaling, sem rolling deploy de verdade
+(bump de imagem já era documentado como restart/recreate manual, nunca
+um `kubectl set image` orquestrado). Usar `Deployment` desde o início
+era estranho dado isso.
+
+**O que mudou:**
+
+- `app/k8s_templates.py::build_deployment` -> `build_pod` -- gera um
+  `Pod` (`apiVersion: v1, kind: Pod`) em vez de `Deployment`
+  (`apps/v1`). O `spec.template.spec` de antes virou `spec` direto
+  (mesmo conteúdo bit-a-bit -- containers/volumes/securityContext --
+  só o nivelamento do wrapper PodTemplateSpec mudou), com
+  `restartPolicy: Always`.
+- `app/k8s_manager.py`: `ensure_deployment` -> `ensure_pod` (usa
+  `CoreV1Api.{read,create,patch}_namespaced_pod` em vez de
+  `AppsV1Api.*_namespaced_deployment`); `wait_for_ready` migrado de ler
+  `status.ready_replicas` (via `read_namespaced_deployment_status`) pra
+  ler o Pod direto (`read_namespaced_pod` -- **de propósito, não**
+  `read_namespaced_pod_status`, pra não precisar de uma regra de RBAC
+  nova pro subrecurso `pods/status`) e conferir `status.phase ==
+  "Running"` E todo `container_statuses[].ready == True`;
+  `teardown_dev_workload` deleta o Pod (`delete_namespaced_pod`) em vez
+  do Deployment. `Clients` perdeu o campo `apps`
+  (`client.AppsV1Api()`) -- nada mais no código usa essa API depois da
+  migração.
+- `app/main.py`: comentários/HTML de `/close`, `/logout` e o lobby
+  atualizados de "Deployment" pra "Pod" (texto visto pelo dev).
+- **Overlay JSON Patch (`app/overlay.py`, `KREWHUB_DEV_POD_OVERLAY_*`)
+  -- BREAKING CHANGE:** a chave de topo do documento de overlay mudou
+  de `deployment:` pra `pod:`, e os paths RFC 6902 mudaram de
+  `/spec/template/spec/...` pra `/spec/...` (Pod não tem o wrapper
+  PodTemplateSpec que Deployment tinha). Um overlay antigo com
+  `deployment:` contra o código novo é **ignorado em silêncio**
+  (`load_overlay_ops` só lê a chave `pod`) -- o Pod sobe sem a
+  afinidade/tolerations configuradas, sem erro nenhum. Migrado nos DOIS
+  overlays reais em produção, no MESMO commit conceitual que este
+  código:
+  - homelab (`galaxy-far-far-away`,
+    `clusters/family-cluster/kirohub/krewhub-central/dev-pod-overlay-configmap.yaml`):
+    `deployment: [{op: add, path: /spec/template/spec/affinity, ...}]`
+    -> `pod: [{op: add, path: /spec/affinity, ...}]`.
+  - `shared-services-stg` (`deploy/shared-services-stg/values-shared-services-stg.yaml`,
+    chave `krewhubCentral.devPodOverlay`): `deployment: [tolerations,
+    nodeSelector em /spec/template/spec/...]` -> `pod: [mesmas duas
+    operações em /spec/...]`.
+- **RBAC (`charts/krewhub/templates/clusterrole.yaml` e
+  `clusters/family-cluster/kirohub/krewhub-central/clusterrole.yaml`,
+  homelab):** removida a regra `apps/deployments`(+`deployments/status`);
+  o recurso `pods` (já existia só com `get/list/watch`, usado pra achar
+  o pod do CHP por label selector) ganhou `create`, `patch`, `update`,
+  `delete` -- mesmo tratamento que `deployments` tinha antes, agora
+  aplicado ao Pod do workload por-dev. Confirmado por leitura do código
+  (não suposto) que nenhum outro lugar usava `AppsV1Api`/`apps/*` --
+  seguro remover a regra inteira, não só esvaziar verbos.
+- **Service/NetworkPolicy:** confirmado no código (`build_service`,
+  `build_networkpolicy`) que os dois selecionam por LABEL
+  (`app=kirocrew`, `krewhub.pespa.net/owner-slug=<slug>`), nunca por
+  owner reference nem por nome/kind do controlador -- **não precisaram
+  de nenhuma mudança**, o Pod puro com os mesmos labels é selecionado
+  exatamente igual a antes.
+
+**Trade-off aceito conscientemente -- documentado, não escondido:** um
+`Deployment`/`ReplicaSet` dá recriação automática se o **Pod inteiro**
+morrer (crash do processo do kubelet, `kubectl delete pod` acidental,
+node caíndo) -- o controller recria sozinho, inclusive em outro nó. Um
+`Pod` puro com `restartPolicy: Always` só cobre reinicio de CONTAINER
+dentro do MESMO Pod (o kubelet reinicia o processo que crashou); se o
+Pod inteiro sumir, ele **não volta sozinho** -- precisa de
+`reconcile_dev`/`/provision` rodar de novo (hoje: só manual, culling
+automático por inatividade ainda não existe, ver "Fora de escopo"
+abaixo). Essa "rede de segurança" do Deployment quase não era
+aproveitada na prática mesmo antes da migração (não há nada
+automatizado chamando `/provision` sozinho hoje) -- a perda é mais
+teórica que prática agora, mas é real e fica registrada aqui.
+**Validado ao vivo** (ver seção "Validação ao vivo da migração Pod"
+abaixo): um `kubectl delete pod kirocrew-<slug>` manual, por fora do
+KrewHub, derruba o pod e ele **fica** derrubado -- nenhum controller
+trouxe ele de volta -- confirmando o trade-off na prática, não só na
+teoria.
 
 ## Fora de escopo desta fatia (não são bloqueios, são a próxima fatia)
 

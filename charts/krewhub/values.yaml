@@ -40,7 +40,7 @@ krewhubCentral:
     # sha-91a483d -- inclui app/overlay.py (mecanismo de overlay JSON
     # Patch, ver krewhubCentral.devPodOverlay abaixo), ausente em tags
     # anteriores. Ver Chart.yaml (appVersion) pro porquê do bump.
-    tag: sha-91a483d
+    tag: sha-a3bdbfa
     pullPolicy: IfNotPresent
 
   # Nome de um Secret docker-registry JÁ EXISTENTE (criado por fora
@@ -110,7 +110,7 @@ krewhubCentral:
 
   # --- Template do pod-por-dev (kirocrew-<slug>) -- passthrough genérico
   # pras env vars que app/config.py já lê (consumidas por
-  # app/k8s_templates.py) pra gerar o Deployment/PVC/NetworkPolicy de
+  # app/k8s_templates.py) pra gerar o Pod/PVC/NetworkPolicy de
   # CADA dev. "" (default, omitido) em qualquer campo abaixo = a env
   # var correspondente NEM é adicionada ao Deployment do
   # krewhub-central -- o app cai no default de app/config.py (hoje:
@@ -163,21 +163,25 @@ krewhubCentral:
   # pod-por-dev (ver app/overlay.py no repo -- mecanismo que substituiu o
   # nodeAffinity hardcoded que existia antes). {} (default) = NENHUM
   # ConfigMap é criado por este chart, e KREWHUB_DEV_POD_OVERLAY_PATH NÃO
-  # é setado -- build_deployment/build_pvc geram manifest 100% genérico
+  # é setado -- build_pod/build_pvc geram manifest 100% genérico
   # (sem afinidade/tolerations/nada de cluster nenhum). Preenchido, vira
   # um ConfigMap (`krewhub-dev-pod-overlay`) montado em
   # /etc/krewhub/dev-pod-overlay no krewhub-central, com
   # KREWHUB_DEV_POD_OVERLAY_PATH apontando pro arquivo montado. Formato:
   # um dict {recurso: [operações JSON Patch]}, uma chave por build_* que
-  # suporta overlay hoje (deployment, pvc) -- ver README, seção "Overlay
+  # suporta overlay hoje (pod, pvc) -- ver README, seção "Overlay
   # JSON Patch por-cluster", pro porquê de JSON Patch e não merge patch.
-  # Exemplo genérico (restringir o pod-por-dev a nós com um label
-  # específico -- qualquer cluster, sem citar nenhum ambiente real):
+  # BREAKING CHANGE: a chave do workload por-dev era `deployment` antes
+  # da migração de Deployment pra Pod puro (ver README, seção
+  # "Deployment vs Pod puro pro workload por-dev") -- um overlay antigo
+  # com `deployment:` é IGNORADO em silêncio pelo código novo. Exemplo
+  # genérico (restringir o pod-por-dev a nós com um label específico --
+  # qualquer cluster, sem citar nenhum ambiente real):
   #
   # devPodOverlay:
-  #   deployment:
+  #   pod:
   #     - op: add
-  #       path: /spec/template/spec/nodeSelector
+  #       path: /spec/nodeSelector
   #       value:
   #         disktype: ssd
   #   pvc: []

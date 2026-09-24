@@ -63,14 +63,14 @@ def _load_overlay_doc(settings: Settings) -> dict:
     if not isinstance(doc, dict):
         raise ValueError(
             "overlay precisa ser um dict {recurso: [operações JSON Patch]} "
-            f"(ex.: {{'deployment': [...]}}) -- veio {type(doc).__name__}"
+            f"(ex.: {{'pod': [...]}}) -- veio {type(doc).__name__}"
         )
     return doc
 
 
 def load_overlay_ops(settings: Settings, resource: str) -> list[dict]:
     """Lista de operações JSON Patch (RFC 6902) configuradas pro
-    `resource` dado (ex. "deployment", "pvc"). [] (default seguro) se
+    `resource` dado (ex. "pod", "pvc"). [] (default seguro) se
     nada configurado, ou se o overlay configurado não menciona esse
     `resource` -- nesse caso o `build_*` correspondente gera o manifest
     100% genérico, sem nada de cluster nenhum."""

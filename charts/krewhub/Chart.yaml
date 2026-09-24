@@ -13,6 +13,37 @@ type: application
 # Versão do CHART -- incrementar a cada mudança de template/values,
 # independente da versão do app (ver appVersion abaixo). SemVer.
 #
+# 0.1.5: dois achados ao vivo durante o rollout coordenado da 0.1.4 em
+# shared-services-stg (cluster real, EKS) -- nenhum dos dois e' regressao
+# desta fatia, os dois ja existiam desde que /close e /logout passaram a
+# desligar o workload de verdade, so nunca tinham sido sincronizados pro
+# chart empacotado:
+# (a) clusterrole.yaml: "delete" em configmaps/services/networkpolicies
+#     estava faltando (so "pods" tinha ganho delete na 0.1.4) -- /close e
+#     /logout devolviam 403 "cannot delete resource services" ao tentar
+#     desligar o workload. Mesma correcao que os manifests brutos do
+#     homelab ja tinham (fora do chart) -- agora sincronizada aqui.
+# (b) values.yaml: tag default da imagem bumpada sha-91a483d -> sha-a3bdbfa
+#     -- sha-91a483d nao tem build_pod (codigo Deployment antigo); com o
+#     devPodOverlay novo (chave pod:, formato da 0.1.4) contra essa
+#     imagem, o overlay seria ignorado em silencio (pod sem
+#     afinidade/nodeSelector). Quem ja fixa krewhubCentral.image.tag no
+#     values proprio (como os dois clusters reais deste projeto) nao e'
+#     afetado -- so o default de instalacao nova sem override.
+#
+# 0.1.4: workload por-dev migrado de Deployment pra Pod puro (ver
+# README, seção "Deployment vs Pod puro pro workload por-dev") --
+# `clusterrole.yaml` troca a regra `apps/deployments` por
+# `create/patch/update/delete` em `pods` (BREAKING pra quem gerencia o
+# RBAC fora deste chart: precisa da mesma troca pra não quebrar o
+# reconcile). `devPodOverlay` -- BREAKING CHANGE de schema: a chave de
+# topo do workload por-dev era `deployment:`, agora é `pod:`, e os
+# paths RFC 6902 mudaram de `/spec/template/spec/...` pra `/spec/...`
+# (Pod não tem o wrapper PodTemplateSpec que Deployment tinha) -- um
+# overlay antigo com `deployment:` é ignorado em silêncio pelo código
+# novo. Requer a imagem nova (ver appVersion abaixo) -- a imagem antiga
+# não tem `build_pod`.
+#
 # 0.1.3: expõe via values.yaml (krewhubCentral.devPodTemplate.scheme,
 # KREWHUB_DEV_POD_SCHEME) o scheme público dos pods-por-dev, ao lado de
 # publicPort -- mudança 100% aditiva, default vazio ("") não emite o env
@@ -41,7 +72,7 @@ type: application
 # chpAdminPort/publicPort) + o mecanismo de overlay JSON Patch
 # (app/overlay.py) via ConfigMap opcional -- mudança 100% aditiva, sem
 # alterar nenhum default nem o manifest gerado pro homelab (ver README).
-version: 0.1.3
+version: 0.1.5
 
 # Versão do APP mostrada em `helm list`/labels -- reflete a tag da imagem
 # default em values.yaml (krewhubCentral.image.tag). Atualizar junto se
@@ -56,4 +87,4 @@ version: 0.1.3
 # publicado no GHCR e rodando ao vivo no homelab (kirohub/krewhub-central)
 # antes deste bump -- não foi necessário rebuild, só apontar o chart pra
 # ela (ver README).
-appVersion: "sha-91a483d"
+appVersion: "sha-a3bdbfa"

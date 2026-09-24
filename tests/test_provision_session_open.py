@@ -24,7 +24,7 @@ def _fake_reconcile_result(owner_id: str, slug: str, namespace: str, host: str) 
             "pvc": "created",
             "service": "created",
             "networkpolicy": "created",
-            "deployment": "created",
+            "pod": "created",
         },
     }
 

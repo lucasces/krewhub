@@ -32,7 +32,6 @@ _config_loaded = False
 @dataclass
 class Clients:
     core: client.CoreV1Api
-    apps: client.AppsV1Api
     net: client.NetworkingV1Api
 
 
@@ -60,7 +59,6 @@ def get_clients(settings: Settings) -> Clients:
     _load_config(settings)
     return Clients(
         core=client.CoreV1Api(),
-        apps=client.AppsV1Api(),
         net=client.NetworkingV1Api(),
     )
 
@@ -158,12 +156,12 @@ def ensure_networkpolicy(c: Clients, namespace: str, slug: str, settings: Settin
     )
 
 
-def ensure_deployment(c: Clients, namespace: str, slug: str, settings: Settings) -> str:
-    body = tpl.build_deployment(namespace, slug, settings)
+def ensure_pod(c: Clients, namespace: str, slug: str, settings: Settings) -> str:
+    body = tpl.build_pod(namespace, slug, settings)
     return _ensure(
-        read=c.apps.read_namespaced_deployment,
-        create=c.apps.create_namespaced_deployment,
-        patch=c.apps.patch_namespaced_deployment,
+        read=c.core.read_namespaced_pod,
+        create=c.core.create_namespaced_pod,
+        patch=c.core.patch_namespaced_pod,
         name=f"kirocrew-{slug}",
         namespace=namespace,
         body=body,
@@ -171,15 +169,100 @@ def ensure_deployment(c: Clients, namespace: str, slug: str, settings: Settings)
 
 
 def wait_for_ready(c: Clients, namespace: str, slug: str, *, timeout_s: int = 240, poll_s: int = 5) -> bool:
+    """Antes desta fatia isso lia `read_namespaced_deployment_status` e
+    conferia `status.ready_replicas` (semântica do ReplicaSet). Migrado
+    pra ler o `Pod` diretamente (`read_namespaced_pod` -- de propósito,
+    não `read_namespaced_pod_status`: assim o RBAC continua precisando
+    só de `get` em `pods`, sem precisar de uma regra nova pro
+    subrecurso `pods/status`) e considera Ready quando `status.phase ==
+    "Running"` E todo container reportado em `status.container_statuses`
+    está com `ready == True` (equivalente, pra 1 pod sem réplica, ao que
+    `ready_replicas >= 1` verificava antes)."""
     deadline = time.time() + timeout_s
     name = f"kirocrew-{slug}"
     while time.time() < deadline:
-        dep = c.apps.read_namespaced_deployment_status(name, namespace)
-        ready = dep.status.ready_replicas or 0
-        if ready >= 1:
+        pod = c.core.read_namespaced_pod(name, namespace)
+        status = pod.status
+        container_statuses = status.container_statuses or []
+        ready = (
+            status.phase == "Running"
+            and bool(container_statuses)
+            and all(cs.ready for cs in container_statuses)
+        )
+        if ready:
             return True
         time.sleep(poll_s)
     return False
+
+
+class TeardownError(RuntimeError):
+    """Erro real (não-404) ao deletar um recurso do workload de um dev --
+    nunca inclui PVC/Secret, só os 4 recursos que `teardown_dev_workload`
+    remove (ver docstring). Espelha `session_client.SessionError`: nunca
+    deixa uma `ApiException` crua vazar pra quem chama, sempre um erro
+    já traduzido com o nome do recurso que falhou."""
+
+
+def _delete_ignore_not_found(delete, name: str, namespace: str, *, resource: str) -> str:
+    """`ignore_not_found` na mão -- o cliente `kubernetes` não tem um
+    parâmetro pronto pra isso nos métodos `delete_namespaced_*` (existe
+    só pro CLI `kubectl delete --ignore-not-found`, não pra API client).
+    404 -- já não existe, conta como sucesso (é exatamente o que faz
+    `teardown_dev_workload` idempotente: chamar de novo após já ter
+    deletado tudo, ou parcialmente, nunca falha). Qualquer outro erro
+    (RBAC, timeout, etc.) é real e propaga como `TeardownError` --
+    nunca finge sucesso silenciosamente."""
+    try:
+        delete(name, namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return "already_absent"
+        raise TeardownError(f"falha ao deletar {resource} {name!r} em {namespace}: {exc}") from exc
+    return "deleted"
+
+
+def teardown_dev_workload(c: Clients, namespace: str, slug: str) -> dict:
+    """Contraparte de `reconcile_dev` -- deleta SÓ Pod, Service,
+    NetworkPolicy e ConfigMap do dev (mesmos nomes determinísticos que os
+    `ensure_*` usam pra criar/patchar), preservando EXPLICITAMENTE o PVC
+    (`kiro-workspace-{slug}`) e o Secret (`kiro-owner-id-{slug}`) -- os
+    dois nunca aparecem aqui, de propósito. É isso que garante que um
+    `reconcile_dev` seguinte (via `/provision`, `/open` ou `/lobby`)
+    reconstrói o workload do zero de forma idempotente com o MESMO
+    workspace/histórico/login do kiro-cli (que vivem no PVC) -- é
+    essencialmente um culling manual, por-dev, sob demanda (o culling
+    automático por inatividade continua pendente, ver README).
+
+    Idempotente via `_delete_ignore_not_found` em cada recurso
+    individualmente -- chamar de novo depois de já ter deletado tudo (ou
+    só parte, se uma chamada anterior falhou no meio) nunca falha: cada
+    recurso ausente conta como já removido, não como erro. Levanta
+    `TeardownError` só se a delecão de algum recurso falhar por um
+    motivo real (não-404) -- nesse caso os recursos já deletados ANTES do
+    que falhou continuam deletados (sem rollback), e quem chama pode
+    tentar de novo (idempotente)."""
+    steps = {
+        "pod": _delete_ignore_not_found(
+            c.core.delete_namespaced_pod, f"kirocrew-{slug}", namespace, resource="Pod"
+        ),
+        "service": _delete_ignore_not_found(
+            c.core.delete_namespaced_service, f"kirocrew-{slug}", namespace, resource="Service"
+        ),
+        "networkpolicy": _delete_ignore_not_found(
+            c.net.delete_namespaced_network_policy,
+            f"allow-chp-to-dashboard-only-{slug}",
+            namespace,
+            resource="NetworkPolicy",
+        ),
+        "configmap": _delete_ignore_not_found(
+            c.core.delete_namespaced_config_map, f"kiro-config-{slug}", namespace, resource="ConfigMap"
+        ),
+    }
+    logger.info(
+        "teardown namespace=%s slug=%s steps=%s (PVC kiro-workspace-%s e Secret kiro-owner-id-%s preservados)",
+        namespace, slug, steps, slug, slug,
+    )
+    return {"namespace": namespace, "slug": slug, "steps": steps}
 
 
 def reconcile_dev(settings: Settings, owner_id: str) -> dict:
@@ -203,7 +286,7 @@ def reconcile_dev(settings: Settings, owner_id: str) -> dict:
         "pvc": ensure_pvc(c, namespace, slug, settings),
         "service": ensure_service(c, namespace, slug),
         "networkpolicy": ensure_networkpolicy(c, namespace, slug, settings),
-        "deployment": ensure_deployment(c, namespace, slug, settings),
+        "pod": ensure_pod(c, namespace, slug, settings),
     }
     logger.info("reconcile owner_id=%s namespace=%s slug=%s steps=%s", owner_id, namespace, slug, steps)
     return {"owner_id": owner_id, "slug": slug, "namespace": namespace, "host": host, "steps": steps}

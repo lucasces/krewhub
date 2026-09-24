@@ -27,7 +27,7 @@ def mocked_infra(monkeypatch, settings):
             "slug": slug,
             "namespace": _settings.dev_namespace,
             "host": host,
-            "steps": {"namespace": "exists", "deployment": "created"},
+            "steps": {"namespace": "exists", "pod": "created"},
         }
 
     calls = {"reconcile": 0, "kiro_login": []}

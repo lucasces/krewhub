@@ -1,6 +1,6 @@
 """app/overlay.py -- overlay JSON Patch (RFC 6902) por cima dos manifests
 genéricos. Cobre o achado desta fatia: o nodeAffinity pro control-plane
-estava hardcoded em build_deployment sem via de configuração nenhuma;
+estava hardcoded em build_pod sem via de configuração nenhuma;
 agora é um overlay opcional, com default seguro (sem overlay = manifest
 100% genérico)."""
 
@@ -67,37 +67,37 @@ def test_apply_overlay_adds_a_field_without_mutating_the_original():
 
 def test_load_overlay_ops_empty_when_nothing_configured():
     settings = _settings()
-    assert overlay.load_overlay_ops(settings, "deployment") == []
+    assert overlay.load_overlay_ops(settings, "pod") == []
     assert overlay.load_overlay_ops(settings, "pvc") == []
 
 
 def test_load_overlay_ops_reads_inline_json_fallback():
     settings = _settings(
         dev_pod_overlay_json=json.dumps(
-            {"deployment": [{"op": "add", "path": "/x", "value": 1}]}
+            {"pod": [{"op": "add", "path": "/x", "value": 1}]}
         )
     )
-    assert overlay.load_overlay_ops(settings, "deployment") == [
+    assert overlay.load_overlay_ops(settings, "pod") == [
         {"op": "add", "path": "/x", "value": 1}
     ]
 
 
 def test_load_overlay_ops_missing_resource_key_is_empty():
-    """Overlay configurado só pra `pvc` -- `deployment` continua genérico."""
+    """Overlay configurado só pra `pvc` -- `pod` continua genérico."""
     settings = _settings(dev_pod_overlay_json=json.dumps({"pvc": []}))
-    assert overlay.load_overlay_ops(settings, "deployment") == []
+    assert overlay.load_overlay_ops(settings, "pod") == []
 
 
 def test_load_overlay_ops_reads_from_path_and_path_wins_over_inline(tmp_path):
     overlay_file = tmp_path / "overlay.yaml"
-    overlay_file.write_text("deployment:\n  - op: add\n    path: /from-file\n    value: true\n")
+    overlay_file.write_text("pod:\n  - op: add\n    path: /from-file\n    value: true\n")
     settings = _settings(
         dev_pod_overlay_path=str(overlay_file),
         dev_pod_overlay_json=json.dumps(
-            {"deployment": [{"op": "add", "path": "/from-json", "value": True}]}
+            {"pod": [{"op": "add", "path": "/from-json", "value": True}]}
         ),
     )
-    ops = overlay.load_overlay_ops(settings, "deployment")
+    ops = overlay.load_overlay_ops(settings, "pod")
     assert ops == [{"op": "add", "path": "/from-file", "value": True}]
 
 
@@ -108,10 +108,10 @@ def test_load_overlay_ops_rejects_non_dict_top_level():
         dev_pod_overlay_json=json.dumps([{"op": "add", "path": "/x", "value": 1}])
     )
     with pytest.raises(ValueError):
-        overlay.load_overlay_ops(settings, "deployment")
+        overlay.load_overlay_ops(settings, "pod")
 
 
 def test_load_overlay_ops_rejects_non_list_value_for_resource():
-    settings = _settings(dev_pod_overlay_json=json.dumps({"deployment": {"op": "add"}}))
+    settings = _settings(dev_pod_overlay_json=json.dumps({"pod": {"op": "add"}}))
     with pytest.raises(ValueError):
-        overlay.load_overlay_ops(settings, "deployment")
+        overlay.load_overlay_ops(settings, "pod")

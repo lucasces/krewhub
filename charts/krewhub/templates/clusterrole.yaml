@@ -23,19 +23,35 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
-  # Secret (kiro-owner-id-<slug>), ConfigMap (kiro-config-<slug>),
-  # Service (kirocrew-<slug>), PVC (kiro-workspace-<slug>) -- todos
-  # namespaced, criados/atualizados dentro do namespace compartilhado,
-  # um conjunto por slug de dev.
+  # Secret (kiro-owner-id-<slug>) e PVC (kiro-workspace-<slug>): SEM
+  # "delete" de proposito -- teardown_dev_workload nunca apaga nenhum
+  # dos dois (preserva workspace/identidade do dev entre /close e
+  # reprovisionamento). Mesma garantia ja documentada no GitOps do
+  # homelab, reforcada aqui em profundidade pelo proprio RBAC.
   - apiGroups: [""]
-    resources: ["secrets", "configmaps", "services", "persistentvolumeclaims"]
+    resources: ["secrets", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "patch", "update"]
-  # Pods -- list (achar o pod kirocrew/CHP por label selector) e o
-  # subrecurso exec (rodar `kirocrew token`, `kiro-cli login`, curl na
-  # API admin do CHP).
+  # ConfigMap (kiro-config-<slug>) e Service (kirocrew-<slug>): "delete"
+  # necessario -- teardown_dev_workload apaga os dois no /close e
+  # /logout (achado ao vivo nesta fatia: este chart empacotado tinha
+  # ficado pra tras da mesma correcao ja aplicada nos manifests brutos
+  # do homelab -- sem isso, /close/logout devolvia 403 ao tentar deletar
+  # o Service do dev).
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Pods -- o workload por-dev em si (Pod `kirocrew-<slug>`, migrado de
+  # Deployment nesta fatia -- ver README "Deployment vs Pod puro pro
+  # workload por-dev"): get/list/watch pra achar/ler status (inclui o
+  # pod do CHP por label selector), create/patch/update pro reconcile
+  # (k8s_manager.ensure_pod), delete porque teardown_dev_workload apaga
+  # o Pod no /close e /logout (mesma lógica que antes se aplicava ao
+  # Deployment). k8s_manager.wait_for_ready lê o Pod via
+  # `read_namespaced_pod` (não `read_namespaced_pod_status`) DE PROPÓSITO
+  # -- assim não precisa de uma regra nova pro subrecurso `pods/status`.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # get, não create: o client python (connect_get_namespaced_pod_exec)
   # emite a requisição como HTTP GET com upgrade pra websocket -- o
   # apiserver checa RBAC contra o verbo HTTP real, não contra a
@@ -44,18 +60,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["get", "create"]
-  # Deployment (kirocrew-<slug>) -- create/patch + status
-  # (k8s_manager.wait_for_ready lê status via
-  # read_namespaced_deployment_status).
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
-  - apiGroups: ["apps"]
-    resources: ["deployments/status"]
-    verbs: ["get"]
   # NetworkPolicy (allow-chp-to-dashboard-only-<slug>, uma por dev, com
   # podSelector único -- crítico com o namespace compartilhado).
+  # "delete" adicionado -- teardown_dev_workload apaga a NetworkPolicy
+  # allow-chp-to-dashboard-only-<slug> no /close e /logout (mesmo achado
+  # do bloco acima).
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
 {{- end }}
