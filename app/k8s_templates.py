@@ -273,7 +273,7 @@ def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
             # de nó genérica faz sentido pra QUALQUER cluster.
             # Se o cluster precisar de uma (ex.: nodeAffinity pro
             # control-plane, exigido pelo CSI do rook-cephfs no
-            # galaxy-far-far-away), isso entra via overlay JSON
+            # homelab), isso entra via overlay JSON
             # Patch (ver app/overlay.py, aplicado no fim desta
             # função) -- nunca hardcoded aqui. Path do overlay agora é
             # relativo a `/spec/...` direto (nao mais

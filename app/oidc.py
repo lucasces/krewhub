@@ -1,6 +1,6 @@
-"""Cliente OIDC genérico -- mesma implementação já provada em
-`galaxy-far-far-away/clusters/family-cluster/kirohub/oidc-client-poc/oidc_client.py`
-contra 3 issuers reais (Google, Microsoft, GitLab), adaptada aqui pra ser
+"""Cliente OIDC genérico -- mesma implementação já provada no
+`oidc-client-poc/oidc_client.py` do repo GitOps do homelab (fora deste
+repositório) contra 3 issuers reais (Google, Microsoft, GitLab), adaptada aqui pra ser
 importada por `main.py` em vez de rodada como script solto.
 
 Config 100% via `Settings` (app.config) -- issuer/client_id/client_secret/

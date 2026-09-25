@@ -32,7 +32,7 @@ def _settings(**overrides) -> Settings:
         kirocrew_image="ghcr.io/kirodotdev/kirocrew:0.6.0",
         storage_class="rook-cephfs",
         storage_size="10Gi",
-        chp_namespace="kirohub",
+        chp_namespace="chp-ns",
         chp_pod_label="app=configurable-http-proxy",
         chp_admin_port=8001,
         dev_pod_overlay_path="",

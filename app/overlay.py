@@ -1,7 +1,7 @@
 """Overlay client-side (JSON Patch, RFC 6902) aplicado por cima dos
 manifests genéricos gerados em k8s_templates.py -- é o único lugar onde
 uma peculiaridade de CLUSTER específico (nodeAffinity pro control-plane
-do galaxy-far-far-away, tolerations, volumes extras, o que vier) pode
+do homelab, tolerations, volumes extras, o que vier) pode
 entrar, sem precisar de env var nova nem redeploy de código a cada
 peculiaridade nova (achado da investigação anterior: nodeAffinity
 control-plane estava hardcoded direto em build_deployment, sem via de

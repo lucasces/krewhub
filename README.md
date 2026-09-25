@@ -5,7 +5,7 @@ KrewHub (`kubectl exec` na mão, editar YAML no repo GitOps, `flux
 reconcile` manual) por uma API que faz o reconcile do template
 pod-por-dev via API do Kubernetes.
 
-**Roda dentro do cluster desde a fatia de deploy** (namespace `kirohub`,
+**Roda dentro do cluster desde a fatia de deploy** (namespace `<namespace-real>`,
 mesmo onde o CHP já roda) — ver seção "Deploy no cluster" abaixo pra todo
 o detalhe (imagem, RBAC, como acessar). Continua dando pra rodar local
 também (fora do cluster, lendo `~/.kube/config-personal`) pra iteração
@@ -16,21 +16,25 @@ kubeconfig local se isso falhar.
 > **Nota de rebrand (KiroHub -> KrewHub):** o serviço, código, env vars
 > (`KIROHUB_*` -> `KREWHUB_*`), FastAPI app, docstrings, logger names e o
 > arquivo SQLite (`kirohub.db` -> `krewhub.db`) foram renomeados nesta
-> fatia. **Decisão deliberada de NÃO renomear** (documentada aqui, não
-> assumida): o namespace k8s `kirohub` (onde o CHP já roda hoje e onde
-> este serviço passa a rodar -- ver seção de deploy), os namespaces
-> `kiro-dev-*` por dev, o diretório GitOps
-> `clusters/family-cluster/kirohub/`, e o domínio `kiro.internal` --
-> todos esses continuam com o nome antigo porque (a) `kiro.internal`,
-> `kirocrew`, `kiro-cli`, `kiro-dev-*` são nomenclatura do **produto Kiro
+> fatia. `kiro.internal`, `kirocrew`, `kiro-cli`, `kiro-dev-*` continuam
+> com o nome antigo de propósito -- são nomenclatura do **produto Kiro
 > Crew que estamos hospedando**, não do nosso hub, então não fazem parte
-> do rebrand por definição; e (b) o namespace `kirohub`/diretório GitOps
-> são infraestrutura viva (CHP rodando, rotas registradas, Kustomization
-> do Flux apontando pra lá) -- renomear exigiria deletar/recriar
-> namespace (alto blast-radius, exige aprovação explícita, não assumida
-> aqui). As seções "Provado ao vivo" anteriores a esta fatia preservam os
-> valores de teste originais (ex.: `e2e-test@kirohub.local.test`) como
-> registro histórico exato do que foi executado -- não foram reescritas.
+> do rebrand por definição.
+>
+> O namespace k8s real onde o CHP e o `krewhub-central` rodam hoje, e o
+> diretório GitOps correspondente, mantêm o nome antigo na
+> infraestrutura viva (CHP rodando, rotas registradas, Kustomization do
+> Flux apontando pra lá) -- renomear exigiria deletar/recriar namespace
+> (alto blast-radius, exige aprovação explícita, não assumida aqui).
+> Numa limpeza posterior, porém, o CÓDIGO deste repo deixou de ter esse
+> nome real hardcoded como default (`KREWHUB_CHP_NAMESPACE`/
+> `KREWHUB_K8S_CONTEXT` em `app/config.py` agora são genéricos/vazios --
+> ver tabela de env vars abaixo) -- o valor real passa a vir só do
+> manifest de deploy (fora deste repositório), nunca commitado aqui. Pela
+> mesma razão, os valores de teste usados nas seções "Provado ao vivo"
+> também foram generalizados nessa limpeza (ex.: `e2e-test@krewhub.local.test`
+> em vez do domínio de teste antigo) -- deixaram de ser preservados como
+> registro histórico literal.
 
 ## O que faz
 
@@ -49,16 +53,16 @@ kubeconfig local se isso falhar.
   espera o pod
   ficar Ready e registra a rota no CHP via `exec` no pod dele (a API de
   admin do CHP é loopback-only de propósito — ver
-  `galaxy-far-far-away/clusters/family-cluster/kirohub/chp/deployment.yaml`
+  `<repo-gitops>/clusters/<cluster>/<namespace-real>/chp/deployment.yaml`
   — então falamos com ela de dentro do pod, nunca abrindo rede nova).
   Persiste `owner_id -> {namespace, host, status}` em SQLite
   (`krewhub.db`, MVP — nada de operator/CRD).
 - `GET /login` — monta a authorization URL OIDC (Authorization Code +
   PKCE), reaproveitando a mesma lógica já provada em
-  `galaxy-far-far-away/clusters/family-cluster/kirohub/oidc-client-poc/oidc_client.py`
+  `<repo-gitops>/clusters/<cluster>/<namespace-real>/oidc-client-poc/oidc_client.py`
   contra 3 issuers reais. 100% config-driven — sem `KREWHUB_OIDC_*`
   configurado, retorna 501 explícito. **Testado ao vivo contra o
-  Keycloak da Somos** (Decisão #3, ver seção dedicada abaixo) — devolve
+  Keycloak de um IdP real de terceiro** (Decisão #3, ver seção dedicada abaixo) — devolve
   um 302 de verdade pro `authorization_endpoint` real.
 - `GET /callback` — troca `code` por token, resolve `owner_id` do claim
   `email`/`sub` e, em caso de sucesso, seta o cookie de sessão própria
@@ -107,9 +111,8 @@ nomear recursos; vira um slug DNS-1123-safe (`app/k8s_templates.py::slugify`).
 ## Rodando local
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9100
+uv sync
+uv run uvicorn app.main:app --host 127.0.0.1 --port 9100
 ```
 
 Config (todas opcionais, têm default seguro pra este cluster — exceto as
@@ -118,7 +121,7 @@ Config (todas opcionais, têm default seguro pra este cluster — exceto as
 | Env var | Default |
 |---|---|
 | `KREWHUB_KUBECONFIG` | `~/.kube/config-personal` |
-| `KREWHUB_K8S_CONTEXT` | `galaxy-far-far-away` |
+| `KREWHUB_K8S_CONTEXT` | vazio -- usa o `current-context` já ativo no kubeconfig; só importa no fallback local (o path in-cluster real nunca lê essa env var) |
 | `KREWHUB_DEV_NAMESPACE` | `krewhub-devs` (namespace ÚNICO e compartilhado onde TODOS os pods de dev vivem -- ver seção "Namespace único compartilhado pra pods de dev" abaixo; criado declarativamente no GitOps, não pelo reconcile) |
 | `KREWHUB_BASE_DOMAIN` | `kiro.internal` |
 | `KREWHUB_PUBLIC_PORT` | `8080` (porta local do port-forward do CHP hoje) |
@@ -126,7 +129,7 @@ Config (todas opcionais, têm default seguro pra este cluster — exceto as
 | `KREWHUB_KIROCREW_IMAGE` | `ghcr.io/kirodotdev/kirocrew:0.6.0` |
 | `KREWHUB_STORAGE_CLASS` | `rook-cephfs` |
 | `KREWHUB_STORAGE_SIZE` | `10Gi` |
-| `KREWHUB_CHP_NAMESPACE` | `kirohub` (nome do namespace em si -- ver nota de rebrand abaixo) |
+| `KREWHUB_CHP_NAMESPACE` | `krewhub` (placeholder genérico -- o deploy real sempre seta essa env var explicitamente, ver seção "Deploy no cluster") |
 | `KREWHUB_CHP_ADMIN_PORT` | `8001` |
 | `KREWHUB_DEV_POD_OVERLAY_PATH` | vazio -- path de um arquivo (YAML ou JSON) com overlay JSON Patch (RFC 6902) aplicado em cima do Pod/PVC genéricos de cada dev (ver seção "Overlay JSON Patch por-cluster" abaixo). Vazio = manifest 100% genérico, sem nenhuma restrição de nó/StorageClass fixa de cluster |\n| `KREWHUB_DEV_POD_OVERLAY_JSON` | vazio -- mesmo conteúdo do `_PATH` acima, mas inline (fallback pra dev local/smoke test); `_PATH` tem precedência se os dois vierem setados |\n| `KREWHUB_DB_PATH` | `./krewhub.db` |
 | `KREWHUB_SESSION_TTL` | `24h` (passado a `kirocrew token --ttl`) |
@@ -189,8 +192,8 @@ uma chave por `build_*` que suporta overlay hoje (`pod`, `pvc`):
 ```yaml
 # Equivalente exato ao nodeAffinity que antes estava hardcoded em
 # build_deployment (hoje build_pod) -- é o overlay real usado no
-# galaxy-far-far-away (ver
-# clusters/family-cluster/kirohub/krewhub-central/dev-pod-overlay-configmap.yaml
+# <cluster-homelab> (ver
+# clusters/<cluster>/<namespace-real>/krewhub-central/dev-pod-overlay-configmap.yaml
 # no repo GitOps). Path relativo a /spec direto -- Pod não tem o
 # wrapper PodTemplateSpec que Deployment tinha.
 pod:
@@ -226,19 +229,19 @@ mockado. Só SQLite roda de verdade, sempre num arquivo `tmp_path` por
 teste -- rápido e sem estado compartilhado entre testes.
 
 ```bash
-./test.sh              # roda tudo
-./test.sh -k lobby      # só os testes que batem "lobby" (pytest -k)
-./test.sh -x -v         # para no primeiro erro, verboso
+uv run pytest              # roda tudo
+uv run pytest -k lobby      # só os testes que batem "lobby" (pytest -k)
+uv run pytest -x -v         # para no primeiro erro, verboso
 ```
 
-`python3` não está no PATH por padrão neste NixOS (ver skill
-`nix-develop`) -- `test.sh` bootstrapa um `.venv/` (via `nix develop
-~/personal/nixos#node-22`, que inclui `python3.13`, só na primeira vez)
-e instala `requirements.txt` + `requirements-dev.txt` (`pytest`,
-`httpx2` -- só teste, não vão pra imagem: o `Dockerfile` só copia
-`requirements.txt`) nele antes de rodar. Chamadas seguintes usam
-`.venv/bin/python` direto (auto-contido, não precisa mais de `nix
-develop`).
+Gerenciador de pacotes é `uv` (`pyproject.toml` + `uv.lock`, commitado).
+`uv run` sincroniza o `.venv/` a partir do lock sozinho antes de rodar
+qualquer comando -- sem script wrapper (não existe mais `test.sh`;
+`uv run pytest` já resolve interpretador + deps + venv, idempotente/sem
+custo real quando nada mudou, `python3` não precisa estar no PATH). Deps
+de dev (`pytest`, `httpx2`) ficam no grupo `dev` de
+`[dependency-groups]` -- só teste, não vão pra imagem (o `Dockerfile`
+roda `uv sync --frozen --no-dev`).
 
 **Cobertura, por módulo** (`tests/`):
 
@@ -272,10 +275,10 @@ de API que cabe perguntar antes, não presumir.
 ## Provado ao vivo
 
 ```
-POST /devs/e2e-test%40kirohub.local.test/provision?wait=true
-→ cria kiro-dev-e2e-test-kirohub-local-test do zero (7 recursos), pod Ready
-→ registra e2e-test-kirohub-local-test.kiro.internal no CHP
-→ curl -H "Host: e2e-test-kirohub-local-test.kiro.internal:8080" http://localhost:8080/api/health
+POST /devs/e2e-test%40krewhub.local.test/provision?wait=true
+→ cria kiro-dev-e2e-test-<namespace-real>-local-test do zero (7 recursos), pod Ready
+→ registra e2e-test-<namespace-real>-local-test.kiro.internal no CHP
+→ curl -H "Host: e2e-test-<namespace-real>-local-test.kiro.internal:8080" http://localhost:8080/api/health
   → {"ok": true}
 ```
 
@@ -286,10 +289,10 @@ vez de duplicar — idempotência real, testada, não só declarada.
 
 Deliberadamente adiada em fatias anteriores ("fica pra depois, precisa
 de client_id/secret reais"). Fechada nesta fatia contra um IdP real:
-Keycloak da Somos (`https://auth.devops.somosdigital.io/auth/realms/master`),
+Keycloak de um IdP real de terceiro (`https://auth.devops.example.internal/auth/realms/master`),
 client confidencial `krewhub` registrado pelo Lucas, `client_secret`
 aplicado via `kubectl` direto num Secret `krewhub-oidc` no namespace
-`kirohub` (chaves `client-id`/`client-secret`/`issuer`/`redirect-uri` --
+`<namespace-real>` (chaves `client-id`/`client-secret`/`issuer`/`redirect-uri` --
 **nunca versionado em git**, mesma exceção já usada pro `imagePullSecret`
 `ghcr-pull`; só a REFERÊNCIA ao Secret é git-tracked no
 `deployment.yaml`). `KREWHUB_OIDC_SCOPES` fica de fora de propósito --
@@ -323,11 +326,11 @@ de IdP pela primeira vez:
 ```
 GET  /login                                          -> 302 pro Keycloak
 GET  /callback?state=...&code=...&session_state=...  -> 302 pro lobby (exchange ok)
-   owner_id resolvido do claim: lucas.ces@somoseducacao.com.br
-GET  /devs/lucas.ces%40somoseducacao.com.br/lobby     -> 200 (cookie recem-setado ja validado)
-POST /devs/lucas.ces%40somoseducacao.com.br/lobby     -> 200 (mesmo cookie, form submetido)
+   owner_id resolvido do claim: lucas.ces@minha-org.com.br
+GET  /devs/lucas.ces%40minha-org.com.br/lobby     -> 200 (cookie recem-setado ja validado)
+POST /devs/lucas.ces%40minha-org.com.br/lobby     -> 200 (mesmo cookie, form submetido)
    reconcile real: namespace krewhub-devs, 6 recursos criados, pod kirocrew Ready
-   rota registrada no CHP: lucas-ces-somoseducacao-com-br.kiro.internal
+   rota registrada no CHP: lucas-ces-minha-org-com-br.kiro.internal
 ```
 
 Ou seja: não foi só o exchange que funcionou -- o cookie setado pelo
@@ -458,8 +461,8 @@ Service do CHP + `Host:` header), depois de buildar/pushar
 flux-system` -- ver "Deploy no cluster" pra explicação de por que
 `krewhub-central/` reconcilia pela Kustomization raiz `flux-system`, não
 por uma própria: os manifests desse diretório não têm uma
-`kirohub-krewhub-central.yaml` dedicada como `chp/`/`dev-testdev/` têm,
-então quem aplica é o `flux-system` recursivo em `./clusters/family-cluster`
+`<namespace-real>-krewhub-central.yaml` dedicada como `chp/`/`dev-testdev/` têm,
+então quem aplica é o `flux-system` recursivo em `./clusters/<cluster>`
 -- confirmado pelas labels `kustomize.toolkit.fluxcd.io/name: flux-system`
 no Deployment já rodando antes desta fatia):**
 
@@ -522,10 +525,10 @@ uma vez).
 
 **Testado ao vivo, através do CHP (não só direto no serviço local):**
 ```
-POST /devs/e2e-test%40kirohub.local.test/session
-→ {"dashboard_url_with_token": "http://e2e-test-kirohub-local-test.kiro.internal:8080/?token=..."}
+POST /devs/e2e-test%40krewhub.local.test/session
+→ {"dashboard_url_with_token": "http://e2e-test-<namespace-real>-local-test.kiro.internal:8080/?token=..."}
 
-curl -i -H "Host: e2e-test-kirohub-local-test.kiro.internal:8080" \
+curl -i -H "Host: e2e-test-<namespace-real>-local-test.kiro.internal:8080" \
   "http://localhost:8080/?token=..."
 → HTTP/1.1 200 OK
 → Set-Cookie: mc_token_8080=...; HttpOnly; Max-Age=71955; Path=/; SameSite=Lax
@@ -542,7 +545,7 @@ chamando o k8s API direto.
 Antes desta fatia, destravar a tela "Sandbox unavailable"/"Sign in to
 Kiro" exigia `kubectl exec` manual rodando a técnica pty+FIFO documentada
 no README do GitOps
-(`clusters/family-cluster/kirohub/README.md`, seção "kiro-cli login").
+(`clusters/<cluster>/<namespace-real>/README.md`, seção "kiro-cli login").
 `app/kiro_login.py` automatiza exatamente essa técnica, cobrindo os dois
 caminhos já vistos manualmente:
 
@@ -601,13 +604,13 @@ POST /devs/{owner_id}/kiro-login                          -> 400 (mode ausente)
 POST /devs/{owner_id}/kiro-login?mode=bogus                -> 400 (mode inválido)
 POST /devs/{owner_id}/kiro-login?mode=org                  -> 400 (sem identity_provider/region, sem env var)
 
-POST /devs/e2e-test%40kirohub.local.test/kiro-login
-     ?mode=org&identity_provider=https://somosdigital.awsapps.com/start&region=us-east-1
+POST /devs/e2e-test%40krewhub.local.test/kiro-login
+     ?mode=org&identity_provider=https://minha-org.awsapps.com/start&region=us-east-1
 → (≈4.1s) {"mode": "org", "already_logged_in": false,
-           "verification_url": "https://somosdigital.awsapps.com/start/#/device?user_code=DSTF-VQPX",
+           "verification_url": "https://minha-org.awsapps.com/start/#/device?user_code=DSTF-VQPX",
            "user_code": "DSTF-VQPX"}
 
-POST /devs/e2e-test%40kirohub.local.test/kiro-login?mode=personal
+POST /devs/e2e-test%40krewhub.local.test/kiro-login?mode=personal
 → (≈2.9s) {"mode": "personal", "already_logged_in": false,
            "verification_url": "https://view.awsapps.com/start/#/device?user_code=WNZW-NSBR",
            "user_code": "WNZW-NSBR"}
@@ -688,34 +691,34 @@ manualmente depois com `mode`/`identity_provider`/`region` certos.
 **Testado ao vivo, ciclo completo, contra um dev novo (`lobby-test`):**
 
 ```
-GET  /devs/lobby-test%40kirohub.local.test/lobby                       -> 200, form HTML
-POST /devs/lobby-test%40kirohub.local.test/lobby (sem login_mode)      -> 400
+GET  /devs/lobby-test%40krewhub.local.test/lobby                       -> 200, form HTML
+POST /devs/lobby-test%40krewhub.local.test/lobby (sem login_mode)      -> 400
 POST ...                              (login_mode=bogus)               -> 400
 POST ...                              (login_mode=org, sem provider/region) -> 400
 
-POST /devs/lobby-test%40kirohub.local.test/lobby   login_mode=personal
+POST /devs/lobby-test%40krewhub.local.test/lobby   login_mode=personal
 -> 200, página HTML com:
    1. Dashboard do Kiro Crew
-      http://lobby-test-kirohub-local-test.kiro.internal:8080/?token=...
+      http://lobby-test-<namespace-real>-local-test.kiro.internal:8080/?token=...
    2. Login do kiro-cli
       Abra https://view.awsapps.com/start/#/device?user_code=HVGC-ZDJH ...
 ```
 
 Confirmei cada peça de verdade, não só a resposta da API:
-- `curl -H "Host: lobby-test-kirohub-local-test.kiro.internal:8080" http://localhost:8080/?token=...`
+- `curl -H "Host: lobby-test-<namespace-real>-local-test.kiro.internal:8080" http://localhost:8080/?token=...`
   através do CHP -> **200 OK** + `Set-Cookie: mc_token_8080=...` (sessão
   do dashboard real).
 - Um único processo `kiro-cli login --use-device-flow` rodando no pod
   (sem duplicata), `kiro-cli whoami` ainda `Not logged in` (aguardando o
   clique, como esperado de fire-and-forget).
-- `GET /devs/lobby-test%40kirohub.local.test` mostra
+- `GET /devs/lobby-test%40krewhub.local.test` mostra
   `login_mode: "personal"` persistido (e `login_identity_provider`/
   `login_region` vazios, corretos pra esse modo).
 
 **Achado operacional durante o teste (não é bug da fatia, é fato do
 cluster):** o namespace novo (`kiro-dev-lobby-test-...`) ficou com o pod
 **Pending** por alguns minutos -- `0/3 nodes are available: ... 2
-Insufficient cpu`. O cluster `galaxy-far-far-away` já está com 2 dos 3
+Insufficient cpu`. O cluster `<cluster-homelab>` já está com 2 dos 3
 nós em ~88-91% de CPU *requested* (acumulado de fatias anteriores: 3 pods
 de teste + o `kirocrew` de produção + outros workloads do homelab).
 Precisei escalar o `e2e-test` (disposable) a 0 réplicas temporariamente
@@ -772,16 +775,16 @@ flux-system`):**
 GET /devs/lobby-flow-new-test%40krewhub.local.test/lobby
   -> 200, form HTML (radio login_mode, campos identity_provider/region)
 
-(b) owner com registro existente (lucas.ces@somoseducacao.com.br,
+(b) owner com registro existente (lucas.ces@minha-org.com.br,
     login_mode=org salvo de um provision real anterior)
-GET /devs/lucas.ces%40somoseducacao.com.br/lobby
+GET /devs/lucas.ces%40minha-org.com.br/lobby
   -> 200, PULA o form, direto pra pagina de resultado:
      "Voce ja esta logado no kiro-cli" (kiro-login idempotente, nenhum
      device-flow novo disparado) + link do dashboard com token novo +
      link "Reconfigurar sessao"
 
 (c) mesmo owner de (b), forcando o form de novo
-GET /devs/lucas.ces%40somoseducacao.com.br/lobby?reconfigure=1
+GET /devs/lucas.ces%40minha-org.com.br/lobby?reconfigure=1
   -> 200, form HTML de novo (mesmo com login_mode ja salvo)
 ```
 
@@ -827,7 +830,7 @@ essa sessão é a invalidação SERVER-SIDE do achado 1 acima, nunca um
 
 **3) Logout OIDC no Keycloak?** `end_session_endpoint` existe no
 discovery document
-(`https://auth.devops.somosdigital.io/auth/realms/master/protocol/openid-connect/logout`),
+(`https://auth.devops.example.internal/auth/realms/master/protocol/openid-connect/logout`),
 mas fechar esse ciclo direito exigiria persistir o `id_token` do
 Keycloak (hoje descartado em `/callback` -- só `owner_id` é extraído,
 `result["tokens"]` nunca é salvo) pra poder mandar `id_token_hint` --
@@ -865,7 +868,7 @@ chamam o Keycloak.
   já existente.
 
 **Testado ao vivo, contra um owner DESCARTÁVEL primeiro** (achado 1 nunca
-foi executado contra o pod real do `lucas.ces@somoseducacao.com.br` --
+foi executado contra o pod real do `lucas.ces@minha-org.com.br` --
 só depois de confirmar no descartável), via CHP:
 
 ```
@@ -931,9 +934,9 @@ com o MESMO workspace/histórico/login do `kiro-cli`. `/close` propaga
 falha real de teardown como 502; `/logout` trata a mesma falha como
 melhor esforço (nunca impede o logout do KrewHub em si).
 
-**Achado real ao validar contra o cluster homelab (`galaxy-far-far-away`)
+**Achado real ao validar contra o cluster homelab (`<cluster-homelab>`)
 depois do deploy da imagem com essa mudança:** o `ClusterRole
-krewhub-central` (`clusters/family-cluster/kirohub/krewhub-central/clusterrole.yaml`,
+krewhub-central` (`clusters/<cluster>/<namespace-real>/krewhub-central/clusterrole.yaml`,
 GitOps) tinha sido escrito ANTES desta fatia e não tinha nenhum verbo
 `delete` (decisão documentada como correta na época: "o reconcile hoje é
 só create/patch, nunca remove nada"). Resultado: `/close`/`/logout`
@@ -983,13 +986,13 @@ Até esta fatia, o serviço só rodava na máquina do operador
 operador conseguia usar isso**. Isso foi o bloqueio real de adoção
 priorizado nesta fatia (à frente de culling).
 
-**Onde:** `clusters/family-cluster/kirohub/krewhub-central/` -- decisão
+**Onde:** `clusters/<cluster>/<namespace-real>/krewhub-central/` -- decisão
 deliberada de **não** criar um diretório `krewhub/` novo no GitOps (nem
-renomear `kirohub/` -> `krewhub/`): o CHP já roda em
-`clusters/family-cluster/kirohub/chp/`, os Kustomizations do Flux
+renomear `<namespace-real>/` -> `krewhub/`): o CHP já roda em
+`clusters/<cluster>/<namespace-real>/chp/`, os Kustomizations do Flux
 descobrem cada subdiretório automaticamente (mesmo padrão de `chp/` e
 `dev-testdev/`, sem kustomization.yaml agregador no nível acima), e
-colocar o serviço junto do CHP no mesmo namespace (`kirohub`) evita
+colocar o serviço junto do CHP no mesmo namespace (`<namespace-real>`) evita
 qualquer necessidade de NetworkPolicy cross-namespace nova pra ele
 alcançar o CHP. Renomear o diretório todo só por consistência de nome
 não pagaria o churn (precisaria re-registrar o path em nada -- Flux
@@ -997,8 +1000,9 @@ descobre por conteúdo, não por nome -- mas ainda seria um diff enorme e
 sem ganho funcional).
 
 **Imagem:** `ghcr.io/lucasces/krewhub-central:sha-f287446` (tag bump mais recente -- UX do lobby; a fatia original de deploy usou `sha-2a3ad7f`) -- `Dockerfile`
-na raiz deste repo (`python:3.12-slim`, non-root uid 1000, só copia
-`requirements.txt` + `app/`). Build/push feito com `podman` +
+na raiz deste repo (`python:3.12-slim`, non-root uid 1000, `uv sync
+--frozen --no-dev` a partir de `pyproject.toml`/`uv.lock` + `app/`).
+Build/push feito com `podman` +
 `gh auth token | podman login ghcr.io`, mesmo procedimento já usado pro
 `omnigent-server` (ver CLAUDE.md do operador). **Achado no caminho:** o
 pacote ficou `private` por padrão e a troca de visibilidade via API do
@@ -1067,7 +1071,7 @@ o próprio CHP, que já faz host-routing pros pods de dev. `main.py` tem um
 hook de startup (`_self_register_route`) que, se `KREWHUB_SELF_HOST`
 estiver configurado (setado no Deployment como
 `krewhub.kiro.internal`), registra a própria rota no CHP
-(`krewhub.kiro.internal -> krewhub-central.kirohub.svc.cluster.local:8080`)
+(`krewhub.kiro.internal -> krewhub-central.<namespace-real>.svc.cluster.local:8080`)
 do mesmo jeito que registra rota pra cada pod de dev. Resultado prático:
 acesso ao serviço segue exatamente o mesmo padrão já em uso (port-forward
 no Service do CHP + `Host:` header, ou entrada em `/etc/hosts` apontando
@@ -1080,7 +1084,7 @@ depois.
 **`imagePullSecret` (`ghcr-pull`) -- aplicado direto via `kubectl`, NÃO
 commitado no GitOps:**
 ```
-kubectl -n kirohub create secret docker-registry ghcr-pull \
+kubectl -n <namespace-real> create secret docker-registry ghcr-pull \
   --docker-server=ghcr.io --docker-username=lucasces \
   --docker-password="$(gh auth token)" --docker-email=lucas.ces@gmail.com
 ```
@@ -1095,10 +1099,10 @@ o Secret (não precisa tocar no Deployment).
 **Testado ao vivo -- alguém sem o kubeconfig pessoal do operador
 conseguindo usar o serviço:**
 ```
-kubectl -n kirohub rollout status deployment krewhub-central   -> 1/1 Ready
-kubectl -n kirohub logs deploy/krewhub-central:
+kubectl -n <namespace-real> rollout status deployment krewhub-central   -> 1/1 Ready
+kubectl -n <namespace-real> logs deploy/krewhub-central:
   k8s config: in-cluster (ServiceAccount)
-  rota registrada host=krewhub.kiro.internal target=http://krewhub-central.kirohub.svc.cluster.local:8080 status=201
+  rota registrada host=krewhub.kiro.internal target=http://krewhub-central.<namespace-real>.svc.cluster.local:8080 status=201
 
 curl -H "Host: krewhub.kiro.internal:8080" http://localhost:8080/healthz
   -> 200 {"status": "ok"}
@@ -1134,13 +1138,13 @@ passam a compartilhar UM único namespace**.
 
 - **`KREWHUB_DEV_NAMESPACE`** (nova env var, default `krewhub-devs`) --
   namespace **dedicado só a pods de dev**, separado do namespace
-  `kirohub` onde vivem o CHP e o próprio `krewhub-central`. Decisão de
-  manter separado (não reaproveitar `kirohub`): blast-radius de RBAC do
+  `<namespace-real>` onde vivem o CHP e o próprio `krewhub-central`. Decisão de
+  manter separado (não reaproveitar `<namespace-real>`): blast-radius de RBAC do
   `ServiceAccount`/`ClusterRole` do `krewhub-central` fica
   conceitualmente isolado da infra do hub, não por precisar de fronteira
   de rede (isso é RBAC/NetworkPolicy, não namespace boundary).
 - **Criado declarativamente no GitOps**
-  (`clusters/family-cluster/kirohub/krewhub-central/dev-namespace.yaml`),
+  (`clusters/<cluster>/<namespace-real>/krewhub-central/dev-namespace.yaml`),
   **não** pelo reconcile do app -- `ensure_dev_namespace` hoje só faz um
   `read_namespace` (GET) pra confirmar que existe, nunca cria nem edita.
   Isso permitiu **reduzir o RBAC**: o `ClusterRole` perdeu
@@ -1207,9 +1211,9 @@ decisão explícita de migrar ou aposentar.
 
 Logo depois da migração pra namespace único compartilhado + RBAC reduzido
 (seção acima), o Lucas fez o primeiro `/provision` real via login OIDC de
-verdade (`owner_id` = `lucas.ces@somoseducacao.com.br`, claim do Keycloak
-da Somos) e, ao abrir
-`http://lucas-ces-somoseducacao-com-br.kiro.internal:8080/?token=...` no
+verdade (`owner_id` = `lucas.ces@minha-org.com.br`, claim do Keycloak
+de um IdP real de terceiro) e, ao abrir
+`http://lucas-ces-minha-org-com-br.kiro.internal:8080/?token=...` no
 navegador, recebeu **404**. Hipótese inicial (não confirmada de cara):
 regressão do RBAC reduzido ou da normalização do slug, por ser o primeiro
 provision real depois dessas mudanças.
@@ -1217,13 +1221,13 @@ provision real depois dessas mudanças.
 **Evidência coletada, nessa ordem, antes de mexer em qualquer coisa:**
 
 1. `kubectl get all -n krewhub-devs` -- `Deployment`/`Service`/`Pod`
-   `kirocrew-lucas-ces-somoseducacao-com-br` existiam, `1/1 Running`, no
+   `kirocrew-lucas-ces-minha-org-com-br` existiam, `1/1 Running`, no
    namespace compartilhado certo. **Descarta** "recurso não foi criado".
-2. `kubectl logs deploy/krewhub-central -n kirohub` (filtrado por
-   `somoseducacao`) mostrou o reconcile **completo e sem erro**:
+2. `kubectl logs deploy/krewhub-central -n <namespace-real>` (filtrado por
+   `minha-org`) mostrou o reconcile **completo e sem erro**:
    ```
-   INFO:krewhub.k8s:reconcile owner_id=lucas.ces@somoseducacao.com.br namespace=krewhub-devs slug=lucas-ces-somoseducacao-com-br steps={'namespace': 'exists', 'secret': 'created', 'configmap': 'created', 'pvc': 'created', 'service': 'created', 'networkpolicy': 'created', 'deployment': 'created'}
-   INFO:krewhub.chp:rota registrada host=lucas-ces-somoseducacao-com-br.kiro.internal target=http://kirocrew-lucas-ces-somoseducacao-com-br.krewhub-devs.svc.cluster.local:5476 status=201
+   INFO:krewhub.k8s:reconcile owner_id=lucas.ces@minha-org.com.br namespace=krewhub-devs slug=lucas-ces-minha-org-com-br steps={'namespace': 'exists', 'secret': 'created', 'configmap': 'created', 'pvc': 'created', 'service': 'created', 'networkpolicy': 'created', 'deployment': 'created'}
+   INFO:krewhub.chp:rota registrada host=lucas-ces-minha-org-com-br.kiro.internal target=http://kirocrew-lucas-ces-minha-org-com-br.krewhub-devs.svc.cluster.local:5476 status=201
    ```
    Nenhum 403/401 relacionado a esse `owner_id`, nenhum erro de RBAC nos
    sete steps do reconcile. **Descarta** "RBAC reduzido bloqueou alguma
@@ -1233,9 +1237,9 @@ provision real depois dessas mudanças.
    `chp-admin-token`) confirmou a rota registrada, host **exatamente**
    igual ao esperado, sem diferença de normalização (`.`/`@` -> `-`):
    ```
-   "/lucas-ces-somoseducacao-com-br.kiro.internal": {
-     "target": "http://kirocrew-lucas-ces-somoseducacao-com-br.krewhub-devs.svc.cluster.local:5476",
-     "host": "lucas-ces-somoseducacao-com-br.kiro.internal"
+   "/lucas-ces-minha-org-com-br.kiro.internal": {
+     "target": "http://kirocrew-lucas-ces-minha-org-com-br.krewhub-devs.svc.cluster.local:5476",
+     "host": "lucas-ces-minha-org-com-br.kiro.internal"
    }
    ```
    **Descarta** "rota não registrada" e "bug de normalização de slug".
@@ -1245,7 +1249,7 @@ provision real depois dessas mudanças.
    `9300:8080`, ambos sobras de sessões anteriores testando os endpoints
    do próprio `krewhub-central`) apontavam **direto pro Service do
    `krewhub-central`**, não pro Service do CHP. `curl -H 'Host:
-   lucas-ces-somoseducacao-com-br.kiro.internal' http://127.0.0.1:8080/`
+   lucas-ces-minha-org-com-br.kiro.internal' http://127.0.0.1:8080/`
    confirmou: **404**, vindo do `krewhub-central` (que só conhece suas
    próprias rotas -- `/login`, `/devs/...`, etc. -- e não faz dispatch por
    `Host` header pra outros pods), não do CHP.
@@ -1269,14 +1273,14 @@ apontados pro alvo errado de pé.
 ```bash
 kill <pid-dos-port-forwards-pro-krewhub-central>   # 8080:8080 e 9300:8080
 kubectl port-forward svc/configurable-http-proxy 8080:8000 \
-  --context galaxy-far-far-away --namespace kirohub
+  --context <cluster-homelab> --namespace <namespace-real>
 ```
 
 **Testado ponta a ponta depois da correção**, pelo mesmo túnel (porta
 local `8080`), com `Host` header real:
 
 ```
-curl -H 'Host: lucas-ces-somoseducacao-com-br.kiro.internal' http://127.0.0.1:8080/
+curl -H 'Host: lucas-ces-minha-org-com-br.kiro.internal' http://127.0.0.1:8080/
   -> 200 OK, HTML real do Kiro Crew (aiohttp, dashboard), não mais 404
 
 curl -H 'Host: krewhub.kiro.internal' http://127.0.0.1:8080/
@@ -1286,7 +1290,7 @@ curl -H 'Host: krewhub.kiro.internal' http://127.0.0.1:8080/
 ```
 
 Fluxo `login -> lobby -> provision -> dashboard` confirmado de pé de
-novo pra `lucas.ces@somoseducacao.com.br`.
+novo pra `lucas.ces@minha-org.com.br`.
 
 **Lição operacional pra não repetir:** pra testar `*.kiro.internal:8080`
 localmente (qualquer host, dev ou `krewhub.kiro.internal`), o
@@ -1301,8 +1305,8 @@ conferir o alvo (`svc/configurable-http-proxy`, não outra coisa).
 
 ## "Sessão do dashboard sumiu" depois de um `kiro-cli login` reconhecido -- não é bug do KrewHub (achado do produto Kiro Crew)
 
-Sintoma reportado: pro mesmo owner (`lucas.ces@somoseducacao.com.br`,
-slug `lucas-ces-somoseducacao-com-br`, namespace compartilhado
+Sintoma reportado: pro mesmo owner (`lucas.ces@minha-org.com.br`,
+slug `lucas-ces-minha-org-com-br`, namespace compartilhado
 `krewhub-devs`), o `kiro-cli login` foi reconhecido como já feito (cache
 em `~/.local/share/kiro-cli/data.sqlite3` persistiu certo), **mas** a
 sessão anterior do dashboard (tema, layout, etc.) sumiu, como se fosse
@@ -1310,14 +1314,14 @@ primeiro acesso -- mesmo supostamente sob o mesmo `$HOME` no mesmo PVC.
 Investigado nesta ordem, sem presumir causa:
 
 1. **`kubectl get pvc -n krewhub-devs`** -- só existe **UM** PVC pra esse
-   owner: `kiro-workspace-lucas-ces-somoseducacao-com-br`, `Bound`, idade
+   owner: `kiro-workspace-lucas-ces-minha-org-com-br`, `Bound`, idade
    batendo com o provision original. **Descarta** "PVC órfão do namespace
-   antigo" -- confirmado também que `kiro-dev-lucas-ces-somoseducacao-com-br`
+   antigo" -- confirmado também que `kiro-dev-lucas-ces-minha-org-com-br`
    (o namespace que existiria no modelo pré-migração) nunca existiu: esse
    owner só foi provisionado depois da migração pra namespace
    compartilhado, não tem passado no modelo antigo.
 2. **`describe pvc` + Deployment atual** -- o PVC `Used By` aponta pro
-   pod atual (`kirocrew-lucas-ces-somoseducacao-com-br-9d5485d46-z9xjv`),
+   pod atual (`kirocrew-lucas-ces-minha-org-com-br-9d5485d46-z9xjv`),
    montado em `/home/kirocrew` (volume `home`); só existe mais um volume,
    `tmp` (`emptyDir`, não persistente, esperado). Um único PVC, um único
    ponto de montagem, sem ambiguidade sobre "qual disco está de pé".
@@ -1394,8 +1398,8 @@ de aplicar sem uma decisão explícita.
 
 ## Smoke-test em cluster efêmero (terceira camada de teste, engine plugável)
 
-Duas camadas de teste já existiam: `test.sh` (pytest offline, tudo
-mockado) e o smoke-test MANUAL contra o cluster REAL (`galaxy-far-far-away`,
+Duas camadas de teste já existiam: `uv run pytest` (offline, tudo
+mockado) e o smoke-test MANUAL contra o cluster REAL (`<cluster-homelab>`,
 seções "testado ao vivo" espalhadas por este README). Esta terceira
 camada (`smoke/`) prova o mesmo fluxo ponta a ponta (provision -> rota no
 CHP -> acesso ao dashboard -> close -> logout -> cleanup) contra um
@@ -1418,8 +1422,8 @@ errado sem perceber (ex.: cair num fallback que aponta pro cluster REAL)
 seria pior que exigir uma escolha explícita.
 
 ```bash
-.venv/bin/python smoke/run_smoke.py --list-engines
-KREWHUB_SMOKE_K8S_ENGINE=podman-machine .venv/bin/python smoke/run_smoke.py
+uv run python smoke/run_smoke.py --list-engines
+KREWHUB_SMOKE_K8S_ENGINE=podman-machine uv run python smoke/run_smoke.py
 ```
 
 ### Qual engine funciona neste host hoje: só `podman-machine`
@@ -1492,7 +1496,7 @@ Não sobe nada -- aponta pra um kubeconfig/contexto já existente via
 `KREWHUB_SMOKE_EXTERNAL_KUBECONFIG`/`KREWHUB_SMOKE_EXTERNAL_CONTEXT`
 (sem default de contexto -- não assume qual usar). Útil pra apontar pra
 um namespace descartável dentro de um cluster real (inclusive o próprio
-`galaxy-far-far-away`) se nenhum engine efêmero estiver disponível.
+`<cluster-homelab>`) se nenhum engine efêmero estiver disponível.
 `down()` é sempre no-op -- este engine nunca destrói um cluster que não
 criou.
 
@@ -1556,7 +1560,7 @@ funcionou de primeira depois de resolvido o `helper_binaries_dir`).
 ## Empacotamento Helm (`charts/krewhub/`)
 
 Chart Helm pro que hoje é aplicado manualmente/via Kustomization solta no
-GitOps (`clusters/family-cluster/kirohub/{krewhub-central,chp}/*.yaml`) --
+GitOps (`clusters/<cluster>/<namespace-real>/{krewhub-central,chp}/*.yaml`) --
 **esta fatia só cria e valida o chart, NÃO troca o mecanismo de deploy em
 produção** (segue rodando via GitOps/Flux normalmente até decisão
 explícita em contrário).
@@ -1564,7 +1568,7 @@ explícita em contrário).
 ### Onde o chart vive, e por quê
 
 `charts/krewhub/` dentro **deste repo** (`~/personal/krewhub`), não no
-repo GitOps (`galaxy-far-far-away`) -- decisão, não default: este é o
+repo GitOps (`<cluster-homelab>`) -- decisão, não default: este é o
 repo de CÓDIGO-FONTE do app (Dockerfile, `app/`, testes), e o padrão mais
 comum (e o que menos acopla os dois repos) é o chart viver junto do
 código que ele empacota, com o GitOps só *consumindo* esse chart (via
@@ -1593,7 +1597,7 @@ boilerplate original de demo sobrou.
 
 Cobre exatamente os dois componentes ESTÁTICOS que já rodam em produção,
 fonte de verdade = os manifests atuais em
-`clusters/family-cluster/kirohub/{krewhub-central,chp}/*.yaml`:
+`clusters/<cluster>/<namespace-real>/{krewhub-central,chp}/*.yaml`:
 
 - **`krewhub-central`**: `Deployment`, `Service`, `ServiceAccount`,
   `ClusterRole`/`ClusterRoleBinding` (RBAC mínimo, idêntico ao já
@@ -1624,7 +1628,7 @@ fatia, já incorporadas no chart e revalidadas (`helm lint`/`helm
 template`/comparação ao vivo repetidos depois da mudança, mesmo
 resultado sem regressão):
 
-1. **Nada de específico do homelab `galaxy-far-far-away` como default
+1. **Nada de específico do homelab `<cluster-homelab>` como default
    implícito.** Removidos/generalizados:
    - `krewhubCentral.persistence.storageClassName` -- default agora é
      `""` (o campo `storageClassName` fica OMITIDO do manifest, não
@@ -1642,7 +1646,7 @@ resultado sem regressão):
      `krewhubCentral.imagePullSecretName` (nome `ghcr-pull`) tinham
      valores default do homelab real -- agora `""` por default (recurso
      desligado/pulado até configurar explicitamente).
-   - Removido o value `namespace: kirohub` do topo (não era lido por
+   - Removido o value `namespace: <namespace-real>` do topo (não era lido por
      nenhum template, só documentação solta -- o namespace de instalação
      é sempre o passado em `helm install -n <ns>`).
    - Novo arquivo `charts/krewhub/examples/values-family-cluster.yaml`:
@@ -1756,8 +1760,8 @@ este chart algum dia substituir o deploy atual.
 ```bash
 cd charts/krewhub
 helm lint .                                                 # values genéricos (default) -- OK
-helm template krewhub . --namespace kirohub                 # FALHA de propósito: chp.adminToken.existingSecretName obrigatório
-helm template krewhub . --namespace kirohub \
+helm template krewhub . --namespace <namespace-real>                 # FALHA de propósito: chp.adminToken.existingSecretName obrigatório
+helm template krewhub . --namespace <namespace-real> \
   -f examples/values-family-cluster.yaml                    # override real do homelab -- renderiza limpo
 ```
 
@@ -1770,7 +1774,7 @@ mensagem completa -- testado ao vivo dos dois jeitos).
 Comparação real (com o override `examples/values-family-cluster.yaml`,
 que reproduz os valores reais do homelab): rodei `kubectl get <cada um
 dos 9 recursos> -o yaml`
-contra o cluster `galaxy-far-far-away` (produção) e comparei campo a
+contra o cluster `<cluster-homelab>` (produção) e comparei campo a
 campo contra a saída do `helm template` (normalizando só o que o
 apiserver preenche sozinho -- `status`, `resourceVersion`,
 `managedFields`, defaults de probe/`Pod`/`Service`/`PVC`, anotações do
@@ -1800,7 +1804,7 @@ settings do template pod-por-dev (`KREWHUB_STORAGE_CLASS`,
 `KREWHUB_STORAGE_SIZE`, `KREWHUB_BASE_DOMAIN`, `KREWHUB_KIROCREW_IMAGE`,
 `KREWHUB_CHP_NAMESPACE`, `KREWHUB_CHP_ADMIN_PORT`, `KREWHUB_PUBLIC_PORT`)
 caiam sempre no default de `app/config.py` (valores do homelab --
-`rook-cephfs`, `kiro.internal`, `kirohub`, `kirocrew:0.6.0`), e o
+`rook-cephfs`, `kiro.internal`, `<namespace-real>`, `kirocrew:0.6.0`), e o
 mecanismo de overlay JSON Patch novo (`app/overlay.py`, seção acima)
 não tinha via de configuração NENHUMA pelo chart -- só dava pra ligar
 editando o Deployment à mão (como o GitOps faz hoje, fora do chart).
@@ -1822,19 +1826,22 @@ default de `app/config.py`, exatamente como antes desta fatia):
 | `chpAdminPort` | `KREWHUB_CHP_ADMIN_PORT` | `8001` |
 
 **Exceção deliberada -- `chpNamespace` / `KREWHUB_CHP_NAMESPACE`**: o
-default do CÓDIGO é `"kirohub"` (nome fixo do homelab), mas o CHP
-*deste chart* sobe sempre em `.Release.Namespace` (ver
+default do CÓDIGO é um placeholder genérico (`"krewhub"`, sem relação
+com nenhum cluster real -- generalizado numa limpeza posterior, ver
+Nota de rebrand no topo deste README),
+mas o CHP *deste chart* sobe sempre em `.Release.Namespace` (ver
 `chp-deployment.yaml`) -- e `KREWHUB_CHP_NAMESPACE` é usado em três
 pontos que dependem de bater com onde o CHP REALMENTE está:
 `namespaceSelector` da `NetworkPolicy` por-dev
 (`app/k8s_templates.py::build_networkpolicy`), self-register do próprio
 `krewhub-central` no CHP (`app/main.py::_self_register_route`) e a busca
-do pod do CHP via exec (`app/chp_client.py::_find_chp_pod`). Manter o
-default do CÓDIGO (`"kirohub"`) quebraria os três se a release deste
-chart não for instalada no namespace `kirohub` -- por isso, DIFERENTE
-dos campos acima, o chart SEMPRE seta `KREWHUB_CHP_NAMESPACE`
-(`devPodTemplate.chpNamespace | default .Release.Namespace`), nunca
-omite. Override explícito ainda funciona, pro caso do CHP viver fora
+do pod do CHP via exec (`app/chp_client.py::_find_chp_pod`). Depender do
+default do CÓDIGO quebraria os três sempre que a release deste chart
+não for instalada num namespace chamado literalmente `krewhub` -- por
+isso, DIFERENTE dos campos acima, o chart SEMPRE seta
+`KREWHUB_CHP_NAMESPACE` (`devPodTemplate.chpNamespace | default
+.Release.Namespace`), nunca omite, independente de qual seja o default
+do código. Override explícito ainda funciona, pro caso do CHP viver fora
 deste chart/namespace.
 
 **Overlay JSON Patch por-cluster via chart -- `krewhubCentral.devPodOverlay`**:
@@ -1858,12 +1865,12 @@ adicionado só no commit `91a483d` (o mais recente em HEAD no momento
 desta fatia). Ligar `krewhubCentral.devPodOverlay` contra a imagem
 antiga faria o `krewhub-central` quebrar no boot (`ImportError`). Sem
 necessidade de rebuild: `sha-91a483d` já estava publicado no GHCR e
-rodando ao vivo no homelab (`kirohub/krewhub-central`, pod `Running`,
+rodando ao vivo no homelab (`<namespace-real>/krewhub-central`, pod `Running`,
 confirmado via `kubectl`/`podman manifest inspect` contra o registry
 real) -- só foi preciso apontar `krewhubCentral.image.tag`/`appVersion`
 pra ela.
 
-**Nenhum valor de outro ambiente (EKS, `shared-services-stg`, etc.)
+**Nenhum valor de outro ambiente (EKS, `example-stg`, etc.)
 hardcoded** -- os únicos lugares onde esses nomes aparecem são um
 exemplo comentado em `values.yaml` (`storageClass: gp3`, ilustrativo,
 igual já era feito pro `rook-cephfs`/homelab) e um values fictício
@@ -1875,17 +1882,17 @@ nunca commitado -- ver "Validação" abaixo).
 ```bash
 cd charts/krewhub
 helm lint .                                                      # 0 chart(s) failed
-helm template krewhub . --namespace kirohub \
+helm template krewhub . --namespace <namespace-real> \
   -f examples/values-family-cluster.yaml                         # homelab -- ver diff abaixo
-helm template krewhub . --namespace shared-services-stg \
+helm template krewhub . --namespace example-stg \
   -f <values fictícios de EKS, não commitados>                   # EKS genérico -- novas env/ConfigMap
 ```
 
 **Diff do `helm template` do homelab, ANTES vs. DEPOIS desta fatia**
 (mesmo `examples/values-family-cluster.yaml`, sem nenhum campo novo
 preenchido): a Única diferença de SPEC real é **uma env var nova**,
-`KREWHUB_CHP_NAMESPACE: "kirohub"` (o comportamento correto e
-equivalente ao default do CÓDIGO no namespace `kirohub`, ver exceção
+`KREWHUB_CHP_NAMESPACE: "<namespace-real>"` (o comportamento correto e
+equivalente ao default do CÓDIGO no namespace `<namespace-real>`, ver exceção
 acima -- não é opção, é uma correção deliberada, não uma regressão), +
 os labels de versão (`helm.sh/chart: krewhub-0.1.1`,
 `app.kubernetes.io/version: "sha-91a483d"`) e a tag de imagem
@@ -1895,14 +1902,14 @@ Nenhum outro campo/env/volume mudou; nenhum `ConfigMap` novo apareceu
 
 **`helm template` com values fictícios de EKS** (`storageClassName: gp3`,
 `devPodTemplate` com `storageClass: gp3`/`storageSize: 20Gi`/
-`baseDomain: s.somosdigital.io`/`kirocrewImage: .../custom-gateway`/
+`baseDomain: s.example.internal`/`kirocrewImage: .../custom-gateway`/
 `publicPort: "8080"`/`chpAdminPort: "8001"`, `devPodOverlay` com um
-`nodeSelector` fictício, `--namespace shared-services-stg` sem override
+`nodeSelector` fictício, `--namespace example-stg` sem override
 de `chpNamespace`) -- renderiza limpo, mostrando:
 - As 6 env vars novas (`KREWHUB_STORAGE_CLASS`, `KREWHUB_STORAGE_SIZE`,
   `KREWHUB_BASE_DOMAIN`, `KREWHUB_KIROCREW_IMAGE`, `KREWHUB_PUBLIC_PORT`,
   `KREWHUB_CHP_ADMIN_PORT`) com os valores do EKS fictício.
-- `KREWHUB_CHP_NAMESPACE: "shared-services-stg"` -- confirma o default
+- `KREWHUB_CHP_NAMESPACE: "example-stg"` -- confirma o default
   `.Release.Namespace` funcionando sem nenhum override explícito.
 - Um `ConfigMap krewhub-dev-pod-overlay` novo, com o documento overlay
   exato passado em `devPodOverlay`.
@@ -1921,7 +1928,7 @@ Duas formas de o Flux consumir este chart, nenhuma decidida:
    -- substituiria as duas `Kustomization`s atuais relacionadas a
    `krewhub-central` (nota: hoje **não existe** uma `Kustomization` do
    Flux dedicada a `krewhub-central`; achado desta fatia, ver abaixo) e
-   `kirohub-chp`.
+   `<namespace-real>-chp`.
 2. **Manter a `Kustomization` atual**, só trocando o CONTEÚDO versionado
    de manifests brutos pelo resultado de `helm template` commitado (ou
    um `helmCharts:` inline do próprio Kustomize) -- muda menos a
@@ -1930,14 +1937,14 @@ Duas formas de o Flux consumir este chart, nenhuma decidida:
 
 **Achado colateral desta fatia, relevante pra essa decisão**: hoje
 `krewhub-central` **não tem uma Flux `Kustomization` dedicada** -- só
-existem `kirohub-chp` (path `./clusters/family-cluster/kirohub/chp`) e
-`kirohub-dev-testdev`. Os manifests de `kirohub/krewhub-central/*.yaml`
+existem `<namespace-real>-chp` (path `./clusters/<cluster>/<namespace-real>/chp`) e
+`<namespace-real>-dev-testdev`. Os manifests de `<namespace-real>/krewhub-central/*.yaml`
 são aplicados pela `Kustomization` **raiz** `flux-system`
-(`path: ./clusters/family-cluster`, sem `kustomization.yaml` própria
+(`path: ./clusters/<cluster>`, sem `kustomization.yaml` própria
 nesse path -- o kustomize-controller gera uma implícita, achando
 TODO `.yaml` recursivamente) -- confirmado pelo label
 `kustomize.toolkit.fluxcd.io/name: flux-system` no Deployment ao vivo,
-não algo como `kirohub-krewhub-central`. Isso não é um bug urgente (está
+não algo como `<namespace-real>-krewhub-central`. Isso não é um bug urgente (está
 funcionando), mas é uma inconsistência preexistente que qualquer uma das
 duas opções acima resolveria de propósito.
 
@@ -2024,7 +2031,7 @@ provou integridade de publicação, mas não pegou um problema
 DIFERENTE: o `.helmignore` gerado pelo `helm create` (nunca editado até
 agora) não excluía `examples/` -- `helm package` empacota TUDO dentro
 da pasta do chart por padrão, então `examples/values-family-cluster.yaml`
-(valores reais do homelab `galaxy-far-far-away`: `rook-cephfs`,
+(valores reais do homelab `<cluster-homelab>`: `rook-cephfs`,
 `krewhub.kiro.internal`, `ghcr-pull`, nomes reais dos três Secrets)
 **viajou dentro da versão `0.1.0` publicada originalmente**
 (`sha256:eb384972c9...`). Confirmado com evidência antes de corrigir:
@@ -2080,7 +2087,7 @@ krewhub/.helmignore
 ```
 
 Grep por qualquer valor específico de homelab dentro do conteúdo real
-do pacote republicado (`grep -rniE "kiro\.internal|rook-cephfs|galaxy-far-far-away|ghcr-pull|krewhub-oidc|chp-admin-token|coruscant|tatooine" krewhub/`,
+do pacote republicado (`grep -rniE "kiro\.internal|rook-cephfs|<cluster-homelab>|ghcr-pull|krewhub-oidc|chp-admin-token|coruscant|tatooine" krewhub/`,
 rodado no pacote extraído): as únicas ocorrências restantes são 7
 linhas de COMENTÁRIO dentro de `values.yaml`, todas explicitamente
 rotuladas `# Exemplo usado no homelab...` -- nenhuma delas é um valor
@@ -2102,9 +2109,9 @@ uma versão com atalho do homelab embutido.
 
 Decisão do Lucas sobre o ponto que eu tinha deixado em aberto acima: as
 7 linhas de comentário em `values.yaml` (`# Exemplo usado no homelab
-galaxy-far-far-away...`) e uma linha adicional que eu não tinha
+<cluster-homelab>...`) e uma linha adicional que eu não tinha
 verificado (`templates/clusterrole.yaml`, um comentário citando o path
-literal `clusters/family-cluster/kirohub/krewhub-central/clusterrole.yaml`
+literal `clusters/<cluster>/<namespace-real>/krewhub-central/clusterrole.yaml`
 do repo GitOps) também tinham que sumir -- zero referência ao homelab
 no pacote publicado, nem em texto/documentação.
 
@@ -2125,24 +2132,24 @@ nenhuma omitida):
    `krewhub.kiro.internal`; `storageClassName: minha-storage-class` em
    vez de `rook-cephfs`) -- SEM citar nenhum nome real de ambiente. Achei
    e corrigi também um comentário em `templates/clusterrole.yaml` que
-   citava o path literal do GitOps (`clusters/family-cluster/kirohub/...`),
+   citava o path literal do GitOps (`clusters/<cluster>/<namespace-real>/...`),
    não pego pelo grep da 1ª correção porque a lista de termos usada
-   antes não incluía `family-cluster`/`kirohub` sozinhos.
+   antes não incluía `<cluster>`/`<namespace-real>` sozinhos.
 
 **Verificação exaustiva desta 2ª correção**, mesmo procedimento de
 antes (local -> package -> push -> pull de volta -> grep no artefato
 REALMENTE publicado, não só local), com a lista de termos ampliada
-(`family-cluster`, `kirohub` adicionados, além dos já usados):
+(`<cluster>`, `<namespace-real>` adicionados, além dos já usados):
 
 ```
 $ helm pull oci://ghcr.io/lucasces/charts/krewhub --version 0.1.0
 Pulled: ghcr.io/lucasces/charts/krewhub:0.1.0
 Digest: sha256:9aa8f011bd8eed7bf88b8c18e4317a77475a7538f123dc62c4bc3a1ee3ca0810
 
-$ grep -rniE "kiro\.internal|rook-cephfs|galaxy-far-far-away|ghcr-pull|krewhub-oidc|chp-admin-token|coruscant|tatooine|family-cluster|kirohub" krewhub/
+$ grep -rniE "kiro\.internal|rook-cephfs|<cluster-homelab>|ghcr-pull|krewhub-oidc|chp-admin-token|coruscant|tatooine|<cluster>|<namespace-real>" krewhub/
 ZERO ocorrências -- OK
 
-$ helm template krewhub ./krewhub --namespace kirohub    # sem override
+$ helm template krewhub ./krewhub --namespace <namespace-real>    # sem override
 Error: execution error at (krewhub/templates/chp-deployment.yaml:62:27):
   chp.adminToken.existingSecretName é obrigatório quando chp.enabled=true...
 ```
@@ -2163,7 +2170,7 @@ helm show chart oci://ghcr.io/lucasces/charts/krewhub --version 0.1.0
 # chart é genérico de propósito, ver seções acima)
 helm install krewhub oci://ghcr.io/lucasces/charts/krewhub \
   --version 0.1.0 \
-  --namespace kirohub --create-namespace \
+  --namespace <namespace-real> --create-namespace \
   -f seus-values.yaml
 
 # Ou só renderizar/inspecionar sem instalar
@@ -2233,16 +2240,16 @@ era estranho dado isso.
   afinidade/tolerations configuradas, sem erro nenhum. Migrado nos DOIS
   overlays reais em produção, no MESMO commit conceitual que este
   código:
-  - homelab (`galaxy-far-far-away`,
-    `clusters/family-cluster/kirohub/krewhub-central/dev-pod-overlay-configmap.yaml`):
+  - homelab (`<cluster-homelab>`,
+    `clusters/<cluster>/<namespace-real>/krewhub-central/dev-pod-overlay-configmap.yaml`):
     `deployment: [{op: add, path: /spec/template/spec/affinity, ...}]`
     -> `pod: [{op: add, path: /spec/affinity, ...}]`.
-  - `shared-services-stg` (`deploy/shared-services-stg/values-shared-services-stg.yaml`,
+  - `example-stg` (`deploy/example-stg/values-example-stg.yaml`,
     chave `krewhubCentral.devPodOverlay`): `deployment: [tolerations,
     nodeSelector em /spec/template/spec/...]` -> `pod: [mesmas duas
     operações em /spec/...]`.
 - **RBAC (`charts/krewhub/templates/clusterrole.yaml` e
-  `clusters/family-cluster/kirohub/krewhub-central/clusterrole.yaml`,
+  `clusters/<cluster>/<namespace-real>/krewhub-central/clusterrole.yaml`,
   homelab):** removida a regra `apps/deployments`(+`deployments/status`);
   o recurso `pods` (já existia só com `get/list/watch`, usado pra achar
   o pod do CHP por label selector) ganhou `create`, `patch`, `update`,
@@ -2283,7 +2290,7 @@ teoria.
   Deployment em vez de só quando o operador lembra de rodar local).
 - Exchange OIDC real ponta a ponta -- **discovery + `/login` +
   recepção de `code`/`state` no `/callback` testados ao vivo contra o
-  Keycloak da Somos** (ver seção "Exchange OIDC real (Decisão #3)"
+  Keycloak de um IdP real de terceiro** (ver seção "Exchange OIDC real (Decisão #3)"
   acima); só falta o Lucas completar o login de verdade no navegador
   pra exercitar o exchange (`code` -> token) com um `code` real -- não
   simulável programaticamente por design.

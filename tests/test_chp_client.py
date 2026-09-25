@@ -26,7 +26,7 @@ def _settings(**overrides) -> Settings:
         kirocrew_image="img",
         storage_class="sc",
         storage_size="1Gi",
-        chp_namespace="kirohub",
+        chp_namespace="chp-ns",
         chp_pod_label="app=configurable-http-proxy",
         chp_admin_port=8001,
         dev_pod_overlay_path="",

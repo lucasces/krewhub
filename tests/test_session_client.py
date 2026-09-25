@@ -115,11 +115,11 @@ def test_issue_token_url_https_scheme_when_tls_terminates_at_the_edge(monkeypatc
         fake_clients,
         namespace="krewhub-devs",
         slug="dev-a-test-local",
-        host="dev-a-test-local.kiro.s.somosdigital.io",
+        host="dev-a-test-local.kiro.example.internal",
         public_port="443",
         scheme="https",
     )
-    assert url == "https://dev-a-test-local.kiro.s.somosdigital.io:443/?token=THE-TOKEN-VALUE"
+    assert url == "https://dev-a-test-local.kiro.example.internal:443/?token=THE-TOKEN-VALUE"
 
 
 def test_issue_token_url_raises_when_no_token_in_output(monkeypatch, fake_clients):

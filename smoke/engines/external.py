@@ -1,7 +1,7 @@
 """Engine `external` -- não sobe nada; aponta pra um kubeconfig/contexto
 já existente, configurado via env var. É o fallback manual: útil pra
 apontar pra um namespace descartável dentro de um cluster real (inclusive
-o próprio `galaxy-far-far-away`) quando nenhum engine efêmero está
+o próprio homelab) quando nenhum engine efêmero está
 disponível, ou pra rodar o mesmo smoke-test contra um cluster de CI já
 provisionado por outra ferramenta.
 

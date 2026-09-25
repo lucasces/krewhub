@@ -1,0 +1,21 @@
+[project]
+name = "krewhub"
+version = "0.1.0"
+description = "KrewHub central -- reconcile idempotente de workloads por-dev do Kiro Crew via API do Kubernetes + configurable-http-proxy (CHP)."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "jsonpatch>=1.33",
+    "kubernetes>=36.0.3",
+    "python-multipart>=0.0.32",
+    "uvicorn>=0.53.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "pytest>=9.1.1",
+]

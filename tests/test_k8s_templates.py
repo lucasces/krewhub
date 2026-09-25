@@ -51,7 +51,7 @@ def _settings(**overrides) -> Settings:
         kirocrew_image="ghcr.io/kirodotdev/kirocrew:0.6.0",
         storage_class="rook-cephfs",
         storage_size="10Gi",
-        chp_namespace="kirohub",
+        chp_namespace="chp-ns",
         chp_pod_label="app=configurable-http-proxy",
         chp_admin_port=8001,
         dev_pod_overlay_path="",
@@ -77,7 +77,7 @@ def _settings(**overrides) -> Settings:
 def test_slugify_real_owner_id_matches_documented_example():
     # Exemplo real desta sessao de trabalho (ver README, secao "404 no
     # primeiro provision real via OIDC").
-    assert tpl.slugify("lucas.ces@somoseducacao.com.br") == "lucas-ces-somoseducacao-com-br"
+    assert tpl.slugify("lucas.ces@minha-org.com.br") == "lucas-ces-minha-org-com-br"
 
 
 def test_slugify_is_deterministic():
@@ -123,7 +123,7 @@ def test_slugify_empty_alnum_falls_back_to_stable_hash():
 
 def test_host_for_uses_base_domain():
     settings = _settings(base_domain="kiro.internal")
-    assert tpl.host_for("lucas-ces-somoseducacao-com-br", settings) == "lucas-ces-somoseducacao-com-br.kiro.internal"
+    assert tpl.host_for("lucas-ces-minha-org-com-br", settings) == "lucas-ces-minha-org-com-br.kiro.internal"
 
 
 def test_build_resource_names_are_deterministic_by_slug():

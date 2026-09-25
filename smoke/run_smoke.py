@@ -2,10 +2,10 @@
 """Smoke-test do KrewHub central contra um cluster Kubernetes EFÊMERO
 (descartável) -- diferente das outras duas camadas de teste já existentes:
 
-  1. `test.sh` (pytest, offline, ~1.4s) -- tudo mockado, nenhum cluster.
-  2. Smoke-test MANUAL contra o cluster REAL (`galaxy-far-far-away`) --
-     owner descartável, documentado nas seções "testado ao vivo" do
-     README principal.
+  1. `uv run pytest` (offline, ~1.4s) -- tudo mockado, nenhum cluster.
+  2. Smoke-test MANUAL contra o cluster REAL (homelab) -- owner
+     descartável, documentado nas seções "testado ao vivo" do README
+     principal.
 
 Esta camada prova o mesmo fluxo ponta a ponta (provision -> rota no CHP
 -> acesso ao dashboard -> close -> logout -> cleanup) SEM tocar no
@@ -125,7 +125,7 @@ def main() -> int:
 
         print("[2/8] aplicando manifests.yaml (namespaces + CHP) ...")
         _kubectl(handle, "apply", "-f", MANIFESTS_PATH)
-        _kubectl(handle, "-n", "kirohub", "wait", "--for=condition=available",
+        _kubectl(handle, "-n", "krewhub-smoke", "wait", "--for=condition=available",
                  "deployment/configurable-http-proxy", "--timeout=120s")
         steps_ok.append("chp_ready")
 
@@ -145,7 +145,7 @@ def main() -> int:
             KREWHUB_KIROCREW_IMAGE=image_ref,
             KREWHUB_STORAGE_CLASS="local-path",
             KREWHUB_STORAGE_SIZE="256Mi",
-            KREWHUB_CHP_NAMESPACE="kirohub",
+            KREWHUB_CHP_NAMESPACE="krewhub-smoke",
             KREWHUB_CHP_ADMIN_PORT="8001",
             KREWHUB_DB_PATH="/tmp/krewhub-smoke.db",
             KREWHUB_SESSION_TTL="1h",
@@ -158,7 +158,7 @@ def main() -> int:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         python_bin = os.path.join(repo_root, ".venv", "bin", "python")
         if not os.path.isfile(python_bin):
-            raise SmokeFailure(f"{python_bin} não existe -- rode ./test.sh uma vez pra bootstrapar o .venv")
+            raise SmokeFailure(f"{python_bin} não existe -- rode `uv sync` (ou `uv run pytest`) uma vez pra bootstrapar o .venv")
         krewhub_proc = subprocess.Popen(
             [python_bin, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(KREWHUB_PORT)],
             cwd=repo_root,
@@ -202,7 +202,7 @@ def main() -> int:
                 "--context",
                 handle.context,
                 "-n",
-                "kirohub",
+                "krewhub-smoke",
                 "port-forward",
                 "svc/configurable-http-proxy",
                 f"{CHP_LOCAL_PORT}:8000",

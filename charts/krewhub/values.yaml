@@ -115,8 +115,9 @@ krewhubCentral:
   # var correspondente NEM é adicionada ao Deployment do
   # krewhub-central -- o app cai no default de app/config.py (hoje:
   # rook-cephfs, kiro.internal, ghcr.io/kirodotdev/kirocrew:0.6.0,
-  # "kirohub" pro CHP -- todos valores REVISÁVEIS do homelab, nunca
-  # hardcoded aqui no chart). Preencha só o que o SEU cluster precisar
+  # "krewhub" pro CHP -- todos valores REVISÁVEIS/genéricos, nunca
+  # específicos de um cluster real hardcoded aqui no chart). Preencha só
+  # o que o SEU cluster precisar
   # (ex., numa EKS: storageClass: gp3, baseDomain: seu.dominio.example).
   devPodTemplate:
     # StorageClass do PVC de workspace de cada pod-por-dev
@@ -146,7 +147,7 @@ krewhubCentral:
     # (app/main.py::_self_register_route) e na busca do pod do CHP via
     # exec (app/chp_client.py) -- (KREWHUB_CHP_NAMESPACE). AO CONTRÁRIO
     # dos campos acima, este É SEMPRE setado no Deployment: "" (default)
-    # NÃO cai no default do CÓDIGO ("kirohub", específico do homelab) --
+    # NÃO cai no default do CÓDIGO ("krewhub", placeholder genérico) --
     # vira `.Release.Namespace` (o namespace onde o `chp` deste MESMO
     # chart sobe, ver `chp.enabled` abaixo), o comportamento correto pra
     # qualquer instalação genérica. Só sobrescreva se o SEU CHP viver num

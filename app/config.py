@@ -69,7 +69,7 @@ def load_settings() -> Settings:
         k8s_kubeconfig=_env(
             "KREWHUB_KUBECONFIG", os.path.expanduser("~/.kube/config-personal")
         ),
-        k8s_context=_env("KREWHUB_K8S_CONTEXT", "galaxy-far-far-away"),
+        k8s_context=_env("KREWHUB_K8S_CONTEXT", ""),
         dev_namespace=_env("KREWHUB_DEV_NAMESPACE", "krewhub-devs"),
         base_domain=_env("KREWHUB_BASE_DOMAIN", "kiro.internal"),
         public_port=_env("KREWHUB_PUBLIC_PORT", "8080"),
@@ -77,7 +77,7 @@ def load_settings() -> Settings:
         kirocrew_image=_env("KREWHUB_KIROCREW_IMAGE", "ghcr.io/kirodotdev/kirocrew:0.6.0"),
         storage_class=_env("KREWHUB_STORAGE_CLASS", "rook-cephfs"),
         storage_size=_env("KREWHUB_STORAGE_SIZE", "10Gi"),
-        chp_namespace=_env("KREWHUB_CHP_NAMESPACE", "kirohub"),
+        chp_namespace=_env("KREWHUB_CHP_NAMESPACE", "krewhub"),
         chp_pod_label=_env("KREWHUB_CHP_POD_LABEL", "app=configurable-http-proxy"),
         chp_admin_port=int(_env("KREWHUB_CHP_ADMIN_PORT", "8001")),
         dev_pod_overlay_path=_env("KREWHUB_DEV_POD_OVERLAY_PATH", ""),

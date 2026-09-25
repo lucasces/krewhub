@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 krewhub.db
 .pytest_cache/
+
+# Exemplos de values.yaml com valores reais de um cluster (ex.:
+# charts/krewhub/examples/values-family-cluster.yaml) -- fica no
+# workspace pra uso local (helm template -f ...), nunca commitado. Não
+# bate em charts/krewhub/values.yaml (não começa com "values-").
+values-*.yaml

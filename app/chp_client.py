@@ -3,8 +3,8 @@ função (era um passo manual: `kubectl exec` no pod do CHP + curl pra
 localhost:8001).
 
 Por quê exec e não HTTP direto: a API de admin do CHP (porta 8001) é
-`--api-ip 127.0.0.1` DE PROPÓSITO (ver
-`clusters/family-cluster/kirohub/chp/deployment.yaml`) -- não tem Service
+`--api-ip 127.0.0.1` DE PROPÓSITO (ver o manifest do CHP no repo GitOps
+do homelab, fora deste repositório) -- não tem Service
 nem NetworkPolicy abrindo essa porta pra fora do pod. O comentário lá já
 previa isso: "Quando o KrewHub central existir, ele roda DENTRO deste
 mesmo pod (sidecar) ou ganha uma rota de rede explícita revisada nesse

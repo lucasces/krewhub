@@ -13,8 +13,8 @@ type: application
 # Versão do CHART -- incrementar a cada mudança de template/values,
 # independente da versão do app (ver appVersion abaixo). SemVer.
 #
-# 0.1.5: dois achados ao vivo durante o rollout coordenado da 0.1.4 em
-# shared-services-stg (cluster real, EKS) -- nenhum dos dois e' regressao
+# 0.1.5: dois achados ao vivo durante o rollout coordenado da 0.1.4 num
+# segundo cluster real (EKS, ambiente de terceiro) -- nenhum dos dois e' regressao
 # desta fatia, os dois ja existiam desde que /close e /logout passaram a
 # desligar o workload de verdade, so nunca tinham sido sincronizados pro
 # chart empacotado:
@@ -84,7 +84,7 @@ version: 0.1.5
 # 91a483d, o mais recente em HEAD) -- sem este bump, ligar
 # krewhubCentral.devPodOverlay contra a imagem default antiga faria o
 # krewhub-central quebrar no boot (ImportError). sha-91a483d já estava
-# publicado no GHCR e rodando ao vivo no homelab (kirohub/krewhub-central)
+# publicado no GHCR e rodando ao vivo no homelab (krewhub-central)
 # antes deste bump -- não foi necessário rebuild, só apontar o chart pra
 # ela (ver README).
 appVersion: "sha-a3bdbfa"

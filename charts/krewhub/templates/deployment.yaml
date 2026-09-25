@@ -114,10 +114,10 @@ spec:
             # exec (chp_client.py). AO CONTRÁRIO dos blocos acima, este
             # env var é SEMPRE setado: sem override, cai no namespace
             # desta release (onde o `chp` deste mesmo chart sobe, ver
-            # chp.enabled) -- NÃO no default do código ("kirohub",
-            # específico do homelab), que quebraria esses três pontos se
-            # a release não for no namespace "kirohub". Ver
-            # devPodTemplate.chpNamespace em values.yaml.
+            # chp.enabled) -- NÃO no default do código ("krewhub",
+            # placeholder genérico), que quebraria esses três pontos se
+            # a release não for num namespace chamado literalmente
+            # "krewhub". Ver devPodTemplate.chpNamespace em values.yaml.
             - name: KREWHUB_CHP_NAMESPACE
               value: {{ .Values.krewhubCentral.devPodTemplate.chpNamespace | default .Release.Namespace | quote }}
             {{- with .Values.krewhubCentral.devPodTemplate.chpAdminPort }}

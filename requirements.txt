@@ -1,5 +1,0 @@
-fastapi
-uvicorn
-kubernetes
-python-multipart
-jsonpatch

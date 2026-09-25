@@ -1,5 +1,0 @@
-# Dependencias SO de teste -- nao vao pra imagem de producao (Dockerfile
-# so copia requirements.txt). Sem pin de versao, mesmo padrao ja usado em
-# requirements.txt.
-pytest
-httpx2

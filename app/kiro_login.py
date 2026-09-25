@@ -1,7 +1,7 @@
 """Automação do `kiro-cli login` (device-flow) -- elimina o `kubectl exec`
 manual + a técnica pty+FIFO que até esta fatia era feita à mão
-(documentada em detalhe no README do GitOps,
-`clusters/family-cluster/kirohub/README.md`).
+(documentada em detalhe no README do repo GitOps do homelab, fora deste
+repositório).
 
 Cobre os dois caminhos já vistos manualmente:
 

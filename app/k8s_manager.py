@@ -37,12 +37,16 @@ class Clients:
 
 def _load_config(settings: Settings) -> None:
     """In-cluster primeiro (ServiceAccount montado -- é como o serviço
-    roda de verdade agora, dentro do namespace `kirohub`, sem depender do
-    kubeconfig pessoal de ninguém), com fallback pro kubeconfig local (pra
-    continuar dando pra rodar fora do cluster, como nas fatias
-    anteriores). Cacheado num módulo-level flag -- carregar de novo em
-    toda chamada é redundante (client python já mantém o Configuration
-    global depois da primeira carga)."""
+    roda de verdade hoje, dentro do namespace configurado via
+    `KREWHUB_CHP_NAMESPACE`, sem depender do kubeconfig pessoal de
+    ninguém), com fallback pro kubeconfig local (pra continuar dando pra
+    rodar fora do cluster, como nas fatias anteriores). `k8s_context`
+    vazio (default) vira `None` pra lib `kubernetes` -- usa o
+    `current-context` já ativo no kubeconfig, sem exigir um nome de
+    cluster específico hardcoded; só importa nesse fallback local, o
+    path in-cluster nunca lê essa env var. Cacheado num módulo-level
+    flag -- carregar de novo em toda chamada é redundante (client python
+    já mantém o Configuration global depois da primeira carga)."""
     global _config_loaded
     if _config_loaded:
         return
@@ -50,8 +54,8 @@ def _load_config(settings: Settings) -> None:
         config.load_incluster_config()
         logger.info("k8s config: in-cluster (ServiceAccount)")
     except ConfigException:
-        config.load_kube_config(config_file=settings.k8s_kubeconfig, context=settings.k8s_context)
-        logger.info("k8s config: kubeconfig local (%s, contexto %s)", settings.k8s_kubeconfig, settings.k8s_context)
+        config.load_kube_config(config_file=settings.k8s_kubeconfig, context=settings.k8s_context or None)
+        logger.info("k8s config: kubeconfig local (%s, contexto %s)", settings.k8s_kubeconfig, settings.k8s_context or "<current-context>")
     _config_loaded = True
 
 
