@@ -6,8 +6,8 @@ description: >-
   cobre só a infraestrutura ESTÁTICA (o hub em si) -- os recursos
   por-dev (namespace krewhub-devs, pods kirocrew-<slug>) são criados
   dinamicamente pelo próprio krewhub-central via client Python
-  `kubernetes`, fora do lifecycle deste chart -- ver README (seção
-  "Empacotamento Helm") pro porquê exato dessa fronteira.
+  `kubernetes`, fora do lifecycle deste chart -- ver AGENTS.md (seção
+  "Architecture") pro porquê exato dessa fronteira.
 type: application
 
 # Versão do CHART -- incrementar a cada mudança de template/values,
@@ -32,7 +32,8 @@ type: application
 #     afetado -- so o default de instalacao nova sem override.
 #
 # 0.1.4: workload por-dev migrado de Deployment pra Pod puro (ver
-# README, seção "Deployment vs Pod puro pro workload por-dev") --
+# docs/ARCHITECTURE.md, seção "Pure Pod instead of Deployment for the
+# per-dev workload") --
 # `clusterrole.yaml` troca a regra `apps/deployments` por
 # `create/patch/update/delete` em `pods` (BREAKING pra quem gerencia o
 # RBAC fora deste chart: precisa da mesma troca pra não quebrar o

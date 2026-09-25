@@ -9,7 +9,7 @@ namespace-list sem controle nenhum (achado da investigação de "spam de
 namespaces") -- consolidar reduz a área de RBAC dinâmica e o número de
 objetos Namespace que o serviço precisa criar (idealmente zero: o
 namespace compartilhado é criado via GitOps, não pelo reconcile -- ver
-README "Namespace compartilhado pra pods de dev").
+AGENTS.md, seção "Architecture").
 
 Como todos os recursos (Secret/ConfigMap/PVC/Service/Deployment/
 NetworkPolicy) agora coexistem no MESMO namespace, cada um leva o `slug`
@@ -29,12 +29,14 @@ O que NÃO está mais fixo aqui (achado de investigação anterior: estava
 hardcoded sem via de configuração nenhuma) é o nodeAffinity pro node
 control-plane que o CSI do rook-cephfs deste cluster exige -- isso agora
 é responsabilidade do overlay JSON Patch (ver app/overlay.py e
-KREWHUB_DEV_POD_OVERLAY_PATH/_JSON no README): sem overlay configurado,
+KREWHUB_DEV_POD_OVERLAY_PATH/_JSON em docs/ARCHITECTURE.md, seção
+"Per-cluster JSON Patch overlay"): sem overlay configurado,
 build_pod/build_pvc geram manifest 100% genérico, sem nada
 específico de cluster nenhum -- rodam em qualquer cluster k8s.
 
 Mudança de arquitetura desta fatia (migração real, não só investigada --
-ver README, seção "Deployment vs Pod puro pro workload por-dev"): o
+ver docs/ARCHITECTURE.md, seção "Pure Pod instead of Deployment for the
+per-dev workload"): o
 workload por-dev deixou de ser um `Deployment` (1 réplica,
 `ReplicaSet` de tabelinha) e virou um `Pod` puro (`restartPolicy:
 Always`). Nenhum dos recursos k8s pró-réplica fazia sentido aqui -- 1
@@ -48,8 +50,8 @@ morrer): nesse caso um `Pod` puro fica removido até alguém chamar
 `reconcile_dev`/`/provision` de novo -- hoje isso já é sempre manual
 (não há nada automatizado chamando `/provision` sozinho, culling
 automático ainda não existe), então a perda é mais teórica que prática
-agora -- trade-off aceito conscientemente, documentado no README, não
-escondido."""
+agora -- trade-off aceito conscientemente, documentado em
+docs/ARCHITECTURE.md, não escondido."""
 
 from __future__ import annotations
 
@@ -198,7 +200,8 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
     aqui (nome único `allow-chp-to-dashboard-only-<slug>`, podSelector
     único), o pod do dev A nunca é afetado pela regra do dev B, e
     tráfego de A pro pod de B não bate em nenhuma allowlist de B -> é
-    rejeitado. Testado ao vivo (ver README)."""
+    rejeitado. Mecanismo coberto por teste (ver AGENTS.md, seção
+    "Architecture")."""
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
@@ -232,17 +235,19 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
 
 def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
     """Antes desta fatia, este era `build_deployment` (gerava um
-    `Deployment` de 1 réplica com `strategy: Recreate`, ver README
-    seção "Deployment vs Pod puro pro workload por-dev" pro histórico da
-    investigação e da migração real). Migrado pra `Pod` puro:
+    `Deployment` de 1 réplica com `strategy: Recreate`, ver
+    docs/ARCHITECTURE.md, seção "Pure Pod instead of Deployment for the
+    per-dev workload" pro histórico da investigação e da migração
+    real). Migrado pra `Pod` puro:
     `spec.template.spec` do Deployment de antes virou `spec` direto (o
     conteúdo -- containers/volumes/securityContext -- é idêntico,
     bit-a-bit, só o nivelamento do wrapper mudou), com `restartPolicy:
     Always` cobrindo o mesmo caso de restart de container que o
     ReplicaSet cobria na prática pra 1 réplica sem rolling deploy.
 
-    Trade-off aceito conscientemente (documentado no README, não
-    escondido): um `Pod` puro NÃO se auto-recria se o objeto Pod
+    Trade-off aceito conscientemente (documentado em
+    docs/ARCHITECTURE.md, não escondido): um `Pod` puro NÃO se
+    auto-recria se o objeto Pod
     INTEIRO for removido (crash do node, delete acidental) -- só o
     kubelet reiniciando o CONTAINER dentro dele continua automático.
     Recriação nesse caso exige `reconcile_dev`/`/provision` de novo
@@ -262,7 +267,7 @@ def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
             # Deployment dava pra 1 replica -- kubelet reinicia o
             # CONTAINER (crash, OOM, probe falhando) sozinho. O que ISSO
             # nao cobre (perdido conscientemente, ver docstring da
-            # funcao e README): o Pod inteiro sumir (delete manual, node
+            # funcao e docs/ARCHITECTURE.md): o Pod inteiro sumir (delete manual, node
             # cair) -- nesse caso ninguem recria sozinho.
             "restartPolicy": "Always",
             "securityContext": {

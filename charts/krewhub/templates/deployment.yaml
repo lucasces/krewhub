@@ -136,7 +136,7 @@ spec:
             {{- if .Values.krewhubCentral.oidc.existingSecretName }}
             # OIDC -- client_secret é uma credencial real, por isso vem
             # de um Secret JÁ EXISTENTE (não criado por este chart, ver
-            # README "Empacotamento Helm"). Só a REFERÊNCIA (nome/chave)
+            # AGENTS.md, seção "Architecture"). Só a REFERÊNCIA (nome/chave)
             # é parametrizada aqui. Bloco inteiro OMITIDO se
             # existingSecretName não vier setado -- o app tolera isso
             # nativamente (sobe normal, só `/login` e os endpoints de
@@ -165,8 +165,8 @@ spec:
             # (app/auth.py) -- não é o client_secret OIDC (esse continua
             # só pro exchange com o IdP); é um segredo próprio do
             # KrewHub, mesma exceção de não-versionar em git. Vem do
-            # MESMO Secret acima -- ver README pro porquê de agrupar os
-            # dois (mesma decisão já em produção).
+            # MESMO Secret acima (mesma decisão já em produção, pra não
+            # precisar gerir um segundo Secret só pra isso).
             - name: KREWHUB_SESSION_SECRET
               valueFrom:
                 secretKeyRef:

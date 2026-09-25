@@ -1,0 +1,55 @@
+# Reference Karpenter EC2NodeClass (karpenter.k8s.aws/v1) that fixes the
+# Bottlerocket `user.max_user_namespaces=0` gotcha documented in the main
+# README: the hardened Bottlerocket AMI ships with that sysctl at 0 by
+# default, which breaks the Kiro Crew gateway's sandbox
+# (`unshare(CLONE_NEWUSER)` fails with `ENOSPC`, shown as "Sandbox
+# unavailable" in the UI).
+#
+# Not consumed by the Helm chart or by krewhub-central -- this is
+# cluster-level Karpenter config (applied once, alongside a NodePool
+# that selects it) for whichever nodepool will run Kiro Crew dev pods.
+# It isn't distributed with the chart either, same as the other files
+# in this directory: a clean, generic starting point, not a real
+# cluster's config.
+#
+# Every subnetSelectorTerms/securityGroupSelectorTerms/role value below
+# is a PLACEHOLDER -- replace with your own AWS account/cluster's real
+# values before applying. Nothing here is tied to any specific
+# environment.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: bottlerocket-krewhub-devs
+spec:
+  amiFamily: Bottlerocket
+
+  # Standard Karpenter discovery convention: tag your subnets/security
+  # groups with karpenter.sh/discovery=<your-cluster-name> and point
+  # the selector at that tag instead of hardcoding subnet/SG IDs.
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "<your-cluster-name>"
+
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "<your-cluster-name>"
+
+  # IAM role for the node. Karpenter v1 creates/manages the instance
+  # profile from this role automatically -- no separate
+  # `instanceProfile` field needed. Needs the usual EKS node role
+  # policies (AmazonEKSWorkerNodePolicy, AmazonEKS_CNI_Policy,
+  # AmazonEC2ContainerRegistryReadOnly, plus SSM if you use it for
+  # node access).
+  role: "<your-node-role-name>"
+
+  # --- THE POINT OF THIS EXAMPLE -------------------------------------
+  # Bottlerocket userData is TOML, merged by Bottlerocket's own
+  # settings API on boot (not cloud-init/shell like AL2/AL2023). This
+  # raises `user.max_user_namespaces` from the hardened-AMI default of
+  # 0 to a value that lets the Kiro Crew gateway's unshare(CLONE_NEWUSER)
+  # sandbox succeed. Without this block, every dev pod scheduled on a
+  # Bottlerocket node hits the ENOSPC gotcha from the README.
+  userData: |
+    [settings.kernel.sysctl]
+    "user.max_user_namespaces" = "16384"
+  # ---------------------------------------------------------------------

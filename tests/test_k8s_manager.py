@@ -4,8 +4,8 @@ existe) via API do k8s. `Clients` (core/net) e' 100% mockado
 `k8s_manager.get_clients` tambem e' monkeypatchado pra nao tentar
 carregar kubeconfig/in-cluster config nenhum.
 
-Migracao desta fatia (ver README, secao "Deployment vs Pod puro pro
-workload por-dev"): o workload por-dev deixou de ser um `Deployment`
+Migracao desta fatia (ver docs/ARCHITECTURE.md, secao "Pure Pod instead
+of Deployment for the per-dev workload"): o workload por-dev deixou de ser um `Deployment`
 (client `apps.AppsV1Api`) e virou um `Pod` puro (client `core.CoreV1Api`,
 o mesmo ja usado pra Secret/ConfigMap/Service/PVC) -- `Clients` perdeu o
 campo `apps` (nada mais no codigo usa `AppsV1Api`)."""
@@ -89,8 +89,8 @@ def fake_clients(monkeypatch):
 
 
 def test_ensure_dev_namespace_is_read_only(fake_clients):
-    """Achado desta sessão de trabalho (README, "Namespace único
-    compartilhado"): o RBAC não tem create/patch em `namespaces` -- essa
+    """Achado desta sessão de trabalho (AGENTS.md, seção "Architecture"):
+    o RBAC não tem create/patch em `namespaces` -- essa
     função só CONFIRMA que existe, nunca cria/edita."""
     status = k8s_manager.ensure_dev_namespace(fake_clients, "krewhub-devs")
     assert status == "exists"

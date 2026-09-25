@@ -4,7 +4,7 @@ smoke-test.
 Por que essa abstração existe: kind e k3d bateram em paredes estruturais
 neste host (NixOS, sem `/lib/modules` clássico, cgroups/kernel não
 expondo o que o driver docker-in-docker de kind/k3d espera -- ver
-`SmokeReport`/README pra evidência exata de cada tentativa). Em vez de
+`SmokeReport` pra evidência exata de cada tentativa). Em vez de
 hardcodar "o jeito que funcionou aqui" (podman machine) no script de
 smoke-test, o script principal (`run_smoke.py`) só fala com esta
 interface -- trocar de engine no futuro (voltar pra kind/k3d se o host

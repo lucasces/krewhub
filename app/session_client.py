@@ -81,7 +81,8 @@ def issue_token_url(
 def revoke_session(c: Clients, *, namespace: str, slug: str) -> str:
     """Executa `kirocrew logout` dentro do pod `kirocrew-{slug}` --
     revoga de verdade TODAS as sessões ativas do dashboard desse dev
-    (achado documentado no README: `kirocrew logout` faz um
+    (mecanismo documentado em docs/ARCHITECTURE.md, seção "`/close` vs
+    `/logout`": `kirocrew logout` faz um
     `POST http://127.0.0.1:<port>/api/logout` LOCAL ao pod, autenticado
     com o mesmo `X-Local-Secret` de arquivo que `kirocrew token` já usa
     -- não precisa de pty/wizard, `exec` simples como `issue_token_url`

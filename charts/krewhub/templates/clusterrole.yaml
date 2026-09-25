@@ -41,8 +41,8 @@ rules:
     resources: ["configmaps", "services"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # Pods -- o workload por-dev em si (Pod `kirocrew-<slug>`, migrado de
-  # Deployment nesta fatia -- ver README "Deployment vs Pod puro pro
-  # workload por-dev"): get/list/watch pra achar/ler status (inclui o
+  # Deployment nesta fatia -- ver docs/ARCHITECTURE.md, seção "Pure Pod
+  # instead of Deployment for the per-dev workload"): get/list/watch pra achar/ler status (inclui o
   # pod do CHP por label selector), create/patch/update pro reconcile
   # (k8s_manager.ensure_pod), delete porque teardown_dev_workload apaga
   # o Pod no /close e /logout (mesma lógica que antes se aplicava ao
@@ -56,7 +56,8 @@ rules:
   # emite a requisição como HTTP GET com upgrade pra websocket -- o
   # apiserver checa RBAC contra o verbo HTTP real, não contra a
   # convenção usual de "create" documentada pro kubectl exec (achado ao
-  # vivo, documentado no README do krewhub).
+  # vivo, documentado em docs/ARCHITECTURE.md, seção "RBAC: a
+  # non-obvious verb").
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["get", "create"]

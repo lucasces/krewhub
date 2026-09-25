@@ -59,7 +59,7 @@ def fake_clients():
 
 
 def test_register_route_uses_token_auth_header_not_bearer(monkeypatch, fake_clients):
-    """Achado documentado no README: a API do CHP usa
+    """Achado documentado em AGENTS.md: a API do CHP usa
     `Authorization: token <valor>`, NÃO `Authorization: Bearer <valor>`
     -- um Bearer aqui dá 403 silencioso contra o CHP real."""
     captured = {}

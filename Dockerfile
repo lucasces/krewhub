@@ -1,12 +1,12 @@
 # KrewHub central -- imagem minima pra rodar o servico dentro do cluster
 # (antes rodava so localmente, lendo o kubeconfig pessoal do operador --
-# ver README, secao "Deploy no cluster").
+# ver AGENTS.md, secao "Architecture").
 FROM docker.io/library/python:3.12-slim
 
 # uv (binario estatico, so copiado da imagem oficial publicada pela
 # Astral -- nao e' um build stage nosso, so uma COPY --from= de uma
 # imagem pronta) gerencia deps a partir de pyproject.toml/uv.lock (ver
-# README, secao "Rodando local"). Versao pinada pra bater com a usada
+# AGENTS.md, secao "Environment"). Versao pinada pra bater com a usada
 # pra gerar o uv.lock commitado.
 COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /uvx /usr/local/bin/
 

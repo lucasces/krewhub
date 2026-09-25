@@ -1,6 +1,5 @@
 """GET / (krewhub.kiro.internal) -- entrypoint que decide login vs lobby
-sozinho. Ver app/main.py::root e README secao "GET / (raiz de
-krewhub.kiro.internal)"."""
+sozinho. Ver app/main.py::root."""
 
 from __future__ import annotations
 

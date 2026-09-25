@@ -4,7 +4,8 @@ podia reconciliar/reemitir sessao pra qualquer owner_id, sem nenhuma
 verificacao).
 
 Token interno assinado (HMAC-SHA256), NAO o access_token do Keycloak.
-Decisao documentada aqui e no README: validar o access_token do IdP
+Decisao documentada aqui e em docs/ARCHITECTURE.md, secao
+"Authentication for KrewHub's own endpoints": validar o access_token do IdP
 direto via JWKS (resolvido pelo discovery ja implementado em app/oidc.py)
 tambem seria uma opcao valida -- mas um token interno proprio evita (a)
 depender da rede ate o IdP em toda request protegida (nao so no
@@ -15,8 +16,9 @@ escopos/permissoes do IdP, nao so identidade -- por mais lugares (cookie
 de browser) do que o necessario; o KrewHub so precisa saber "quem e" o
 dev, nao o que o Keycloak deixaria esse token especifico fazer.
 
-Mesma regra ja seguida pro token do kirocrew (README, "sessao e
-credencial, nao persistida"): assinado com HMAC usando um segredo
+Mesma regra ja seguida pro token do kirocrew (mesmo trade-off de sessao
+sem revogacao server-side, ver docs/ARCHITECTURE.md, secao
+"Authentication for KrewHub's own endpoints"): assinado com HMAC usando um segredo
 proprio do servico (KREWHUB_SESSION_SECRET, um Secret aplicado direto
 via kubectl, igual ao client-secret OIDC -- nunca versionado em git),
 carrega so owner_id + expiracao, nao precisa de tabela/estado em

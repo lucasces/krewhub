@@ -5,7 +5,7 @@ do homelab, tolerations, volumes extras, o que vier) pode
 entrar, sem precisar de env var nova nem redeploy de código a cada
 peculiaridade nova (achado da investigação anterior: nodeAffinity
 control-plane estava hardcoded direto em build_deployment, sem via de
-configuração -- ver git log/README pra essa investigação).
+configuração -- ver git log pra essa investigação).
 
 Por que JSON Patch (RFC 6902) e não strategic-merge-patch nem JSON Merge
 Patch (RFC 7396):
@@ -48,8 +48,9 @@ from app.config import Settings
 def _load_overlay_doc(settings: Settings) -> dict:
     """{} (documento vazio) se nada configurado. Precedência:
     `KREWHUB_DEV_POD_OVERLAY_PATH` (arquivo, tipicamente montado via
-    ConfigMap gerenciado fora do chart genérico -- ver README, seção
-    "Overlay JSON Patch por-cluster") primeiro; `KREWHUB_DEV_POD_OVERLAY_JSON`
+    ConfigMap gerenciado fora do chart genérico -- ver
+    docs/ARCHITECTURE.md, seção "Per-cluster JSON Patch overlay")
+    primeiro; `KREWHUB_DEV_POD_OVERLAY_JSON`
     (conteúdo inline, útil pra dev local/smoke test sem precisar montar
     arquivo) como fallback; nenhum dos dois setado = documento vazio."""
     if settings.dev_pod_overlay_path:

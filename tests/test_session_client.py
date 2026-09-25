@@ -27,7 +27,8 @@ def fake_clients():
 def test_find_kirocrew_pod_filters_by_slug_not_just_app_label(fake_clients):
     """Namespace compartilhado: o selector precisa incluir o slug do
     dev, senão "app=kirocrew" sozinho bateria com o pod de QUALQUER
-    outro dev no mesmo namespace (achado documentado no README)."""
+    outro dev no mesmo namespace (achado documentado em AGENTS.md, seção
+    "Architecture")."""
     fake_clients.core.list_namespaced_pod.return_value = mock.Mock(
         items=[_pod("kirocrew-dev-a-abc")]
     )

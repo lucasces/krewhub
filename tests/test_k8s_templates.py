@@ -75,8 +75,8 @@ def _settings(**overrides) -> Settings:
 
 
 def test_slugify_real_owner_id_matches_documented_example():
-    # Exemplo real desta sessao de trabalho (ver README, secao "404 no
-    # primeiro provision real via OIDC").
+    # Exemplo real usado historicamente pra validar o slugify contra um
+    # owner_id de verdade.
     assert tpl.slugify("lucas.ces@minha-org.com.br") == "lucas-ces-minha-org-com-br"
 
 
@@ -176,7 +176,8 @@ def test_build_resource_names_differ_between_owners():
 
 
 def test_networkpolicy_pod_selector_is_scoped_to_this_devs_slug_only():
-    """Ponto crítico de segurança documentado no README: isolamento de
+    """Ponto crítico de segurança documentado em AGENTS.md, seção
+    "Architecture": isolamento de
     rede entre devs no namespace COMPARTILHADO depende do podSelector
     específico do slug -- não da fronteira do namespace."""
     settings = _settings()

@@ -1,5 +1,5 @@
 # See AGENTS.md
 
-Convenções e gotchas do projeto vivem em [`AGENTS.md`](./AGENTS.md) —
-leia esse arquivo primeiro. Este ponteiro existe só porque alguns
-clientes (Claude Code) procuram `CLAUDE.md` especificamente.
+Project conventions and gotchas live in [`AGENTS.md`](./AGENTS.md) —
+read that file first. This pointer exists only because some clients
+(Claude Code) look for `CLAUDE.md` specifically.

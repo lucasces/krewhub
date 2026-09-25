@@ -19,7 +19,7 @@
 # 501 até isso ser configurado, comportamento já nativo do app), o chart
 # só documenta como pré-requisito funcional e pula os env vars por
 # inteiro se o nome não vier setado -- nunca falha o template por causa
-# disso. Ver README, seção "Empacotamento Helm", pra essa decisão.
+# disso. Ver AGENTS.md, seção "Architecture", pra essa decisão.
 
 # Namespace COMPARTILHADO onde TODOS os pods de dev (kirocrew-<slug>)
 # vivem -- criado aqui DECLARATIVAMENTE (o reconcile do krewhub-central
@@ -170,11 +170,11 @@ krewhubCentral:
   # /etc/krewhub/dev-pod-overlay no krewhub-central, com
   # KREWHUB_DEV_POD_OVERLAY_PATH apontando pro arquivo montado. Formato:
   # um dict {recurso: [operações JSON Patch]}, uma chave por build_* que
-  # suporta overlay hoje (pod, pvc) -- ver README, seção "Overlay
-  # JSON Patch por-cluster", pro porquê de JSON Patch e não merge patch.
+  # suporta overlay hoje (pod, pvc) -- ver docs/ARCHITECTURE.md, seção
+  # "Per-cluster JSON Patch overlay", pro porquê de JSON Patch e não merge patch.
   # BREAKING CHANGE: a chave do workload por-dev era `deployment` antes
-  # da migração de Deployment pra Pod puro (ver README, seção
-  # "Deployment vs Pod puro pro workload por-dev") -- um overlay antigo
+  # da migração de Deployment pra Pod puro (ver docs/ARCHITECTURE.md, seção
+  # "Pure Pod instead of Deployment for the per-dev workload") -- um overlay antigo
   # com `deployment:` é IGNORADO em silêncio pelo código novo. Exemplo
   # genérico (restringir o pod-por-dev a nós com um label específico --
   # qualquer cluster, sem citar nenhum ambiente real):

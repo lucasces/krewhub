@@ -1,5 +1,5 @@
-"""GET /close vs GET /logout -- ver README, seção "`/close` derruba o
-workload". `session_client.revoke_session` e `k8s_manager.
+"""GET /close vs GET /logout -- ver docs/ARCHITECTURE.md, seção
+"`/close` vs `/logout`". `session_client.revoke_session` e `k8s_manager.
 teardown_dev_workload` mockados (nenhum kubectl exec/API k8s real)."""
 
 from __future__ import annotations

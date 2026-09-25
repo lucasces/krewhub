@@ -2,8 +2,8 @@
 # namespaces + o CHP (mesma imagem/flags do manifest real do CHP no
 # repo GitOps do homelab) -- NÃO é o mesmo arquivo (evita acoplar o
 # smoke-test ao layout do repo GitOps), mas é conceitualmente idêntico. `krewhub-central` NÃO é deployado aqui como
-# pod -- roda como processo local (mesmo modo "Rodando local" já
-# documentado no README principal), apontando pro kubeconfig do cluster
+# pod -- roda como processo local (fora do cluster, `uvicorn`/`uv run`
+# direto, ver AGENTS.md), apontando pro kubeconfig do cluster
 # efêmero; mais rápido de iterar e exercita exatamente o mesmo código.
 apiVersion: v1
 kind: Namespace

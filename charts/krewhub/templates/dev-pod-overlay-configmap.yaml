@@ -5,8 +5,9 @@
 # substituiu o nodeAffinity hardcoded que existia antes). Documento
 # {recurso: [operações]}, uma chave por build_* que suporta overlay hoje
 # (pod, pvc) -- ver krewhubCentral.devPodOverlay em values.yaml pro
-# formato exato e um exemplo genérico. BREAKING CHANGE (ver README,
-# seção "Deployment vs Pod puro pro workload por-dev"): a chave era
+# formato exato e um exemplo genérico. BREAKING CHANGE (ver
+# docs/ARCHITECTURE.md, seção "Pure Pod instead of Deployment for the
+# per-dev workload"): a chave era
 # `deployment` antes da migração de Deployment pra Pod puro -- um
 # overlay antigo com `deployment:` é silenciosamente IGNORADO pelo
 # código novo (só lê `pod:`), gerando um Pod sem a afinidade/

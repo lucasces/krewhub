@@ -7,8 +7,8 @@ compartilhado entre testes.
 
 Isso e' a suite de REGRESSAO pra rodar antes de cada deploy -- diferente
 do smoke-test manual contra um owner descartavel no cluster real (ver
-README, secao "GET /close vs GET /logout" e as demais secoes de teste ao
-vivo), que continua sendo procedimento manual, fora desta suite.
+docs/ARCHITECTURE.md, secao "`/close` vs `/logout`"), que continua
+sendo procedimento manual, fora desta suite.
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ tipo <release>-<chart> -- são fixos (ou vêm de .Values.*.name),
 casando de propósito com os nomes já em produção
 (krewhub-central, configurable-http-proxy, krewhub-central-data, ...)
 pra um `helm template`/futura adoção não forçar replace de recursos por
-mudança de nome. Ver README, seção "Empacotamento Helm".
+mudança de nome. Ver AGENTS.md, seção "Project conventions".
 */}}
 {{- define "krewhub.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}

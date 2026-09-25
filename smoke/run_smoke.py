@@ -4,8 +4,8 @@
 
   1. `uv run pytest` (offline, ~1.4s) -- tudo mockado, nenhum cluster.
   2. Smoke-test MANUAL contra o cluster REAL (homelab) -- owner
-     descartável, documentado nas seções "testado ao vivo" do README
-     principal.
+     descartável, workflow ad-hoc do operador, sem registro formal
+     neste repo.
 
 Esta camada prova o mesmo fluxo ponta a ponta (provision -> rota no CHP
 -> acesso ao dashboard -> close -> logout -> cleanup) SEM tocar no

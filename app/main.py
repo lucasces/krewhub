@@ -111,7 +111,8 @@ def require_session(request: Request) -> str:
 
 def require_owner(owner_id: str, request: Request) -> str:
     """Dependencia FastAPI pros endpoints que agem sobre um owner_id
-    especifico -- fecha o gap documentado no README ("qualquer um que
+    especifico -- fecha o gap documentado em docs/ARCHITECTURE.md, secao
+    "Authentication for KrewHub's own endpoints" ("qualquer um que
     alcance o CHP provisiona/reemite sessao pra qualquer owner_id").
     Reaproveita `require_session` pra credencial ausente/invalida (401
     ou 302 pro /login, mesma regra); acrescenta so a checagem de
@@ -135,7 +136,8 @@ def _self_register_route() -> None:
     """Reaproveita a mesma infra já usada pros pods de dev (CHP
     host-routing) pra expor o próprio KrewHub central -- em vez de uma
     Ingress nova (não há Ingress controller neste cluster hoje, ver
-    README seção "Deploy no cluster"). Só roda se KREWHUB_SELF_HOST
+    docs/ARCHITECTURE.md, seção "Exposure without an Ingress
+    controller"). Só roda se KREWHUB_SELF_HOST
     estiver configurado (vazio por padrão -- não faz sentido tentar isso
     rodando local, fora do cluster, sem o pod do CHP por perto). Falha
     aqui é só um warning, não derruba o boot -- o serviço continua
@@ -215,8 +217,8 @@ def callback(
     error: str | None = None,
     error_description: str | None = None,
 ) -> RedirectResponse:
-    """Troca code por token -- testado ao vivo (Decisão #3, Keycloak da
-    Somos, ver README). Recebe só o que o IdP de fato manda de volta no
+    """Troca code por token -- testado ao vivo contra um IdP de terceiro
+    (Keycloak). Recebe só o que o IdP de fato manda de volta no
     redirect (`code`+`state`, ou `error`+`error_description` se o dev
     cancelar/negar no provider) -- NUNCA o `code_verifier` na URL (ver
     `/login`); ele é resolvido aqui via `_pending_logins[state]`.
@@ -270,8 +272,8 @@ def callback(
     except auth.AuthTokenError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     # Secure de verdade so quando a conexao ate aqui foi HTTPS -- hoje o
-    # CHP fala HTTP puro com o krewhub-central (ver README "Deploy no
-    # cluster"/"Decisao #3"), setar Secure incondicional faria o browser
+    # CHP fala HTTP puro com o krewhub-central (ver docs/ARCHITECTURE.md,
+    # seção "Exposure without an Ingress controller"), setar Secure incondicional faria o browser
     # DESCARTAR o cookie em silencio numa conexao http:// e quebrar o
     # login inteiro sem nenhum erro visivel. Decisao documentada, nao
     # omitida: quando o CHP ganhar TLS (fora de escopo hoje), isso vira
@@ -294,8 +296,8 @@ def _close_dev_session(owner_id: str) -> dict:
     via HTTP) e `GET /logout` (melhor esforço -- uma falha aqui NÃO pode
     impedir o logout do KrewHub em si, ver `logout` abaixo).
 
-    Mudança de design (era só revogação de token, ver README seção
-    "`/close` derruba o workload"): agora faz DUAS coisas, nesta ordem
+    Mudança de design (era só revogação de token, ver
+    docs/ARCHITECTURE.md, seção "`/close` vs `/logout`"): agora faz DUAS coisas, nesta ordem
     deliberada --
 
     1. Revoga a sessão do dashboard `kirocrew`
@@ -411,7 +413,7 @@ def logout(request: Request) -> RedirectResponse:
     (Pod/Service/NetworkPolicy/ConfigMap, preservando PVC/Secret).
     Não invalida nem revoga nada do lado do IdP (Keycloak): o próximo
     `/login` simplesmente começa um ciclo OIDC novo do zero, decisão
-    deliberada (ver README).
+    deliberada.
 
     TUDO que `_close_dev_session` faz é MELHOR ESFORÇO aqui -- diferente
     de `/close` (onde uma falha REAL de teardown vira 502), uma falha
@@ -534,7 +536,7 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
 
     # Fecha o fluxo "provision -> já cai logado": emite o token de sessão
     # agora (automatiza o que era `kubectl exec ... kirocrew token` manual)
-    # e devolve a URL pronta. Decisão de formato (documentada no README):
+    # e devolve a URL pronta. Decisão de formato (raciocínio abaixo):
     # aqui é JSON (`dashboard_url_with_token`), não um 302 -- /provision é
     # uma chamada de infraestrutura (idempotente, pensada pra script/CI,
     # devolve o estado inteiro do reconcile), misturar um redirect nela
@@ -613,7 +615,8 @@ def open_dashboard(owner_id: str) -> RedirectResponse:
 
     Reconciliar aqui (em vez de só emitir token contra o que já existir)
     passou a importar depois de `/close`/`/logout` desligarem o workload
-    de verdade (ver README): sem isso, um `/open` batido depois de um
+    de verdade (ver docs/ARCHITECTURE.md, seção "`/close` vs `/logout`"):
+    sem isso, um `/open` batido depois de um
     `/close` anterior (ex.: link salvo/favoritado) falharia com 502
     ("nenhum pod Running") em vez de reconstruir o pod do zero -- mesma
     garantia que `/provision`/`/lobby` já davam."""
@@ -795,7 +798,8 @@ def _lobby_result_html(
     # -- os dois nomes sozinhos ("fechar" vs "sair") não deixam óbvio que
     # os DOIS agora desligam infraestrutura de verdade (Pod/
     # Service/NetworkPolicy/ConfigMap), não só invalidam um link -- essa
-    # é a mudança de design desta fatia (ver README).
+    # é a mudança de design desta fatia (ver docs/ARCHITECTURE.md,
+    # seção "`/close` vs `/logout`").
     session_links_html = (
         f'<p style="margin-top:2rem">'
         f'<a href="/devs/{owner_id_html}/lobby?reconfigure=1" style="font-size:0.85em;color:#666">'

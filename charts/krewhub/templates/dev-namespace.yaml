@@ -4,7 +4,7 @@
 # só CONFIRMA que existe via get/list/watch, nunca cria/edita
 # Namespace -- ver clusterrole.yaml). NÃO é um recurso "por-dev": é
 # infra estática do hub, parte do lifecycle deste chart mesmo os PODS
-# que nascem dentro dele não sendo (ver README, "Empacotamento Helm").
+# que nascem dentro dele não sendo (ver AGENTS.md, seção "Architecture").
 apiVersion: v1
 kind: Namespace
 metadata:

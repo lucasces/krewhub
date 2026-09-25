@@ -235,7 +235,8 @@ def teardown_dev_workload(c: Clients, namespace: str, slug: str) -> dict:
     reconstrói o workload do zero de forma idempotente com o MESMO
     workspace/histórico/login do kiro-cli (que vivem no PVC) -- é
     essencialmente um culling manual, por-dev, sob demanda (o culling
-    automático por inatividade continua pendente, ver README).
+    automático por inatividade continua pendente, ver README, seção
+    "Known limitations").
 
     Idempotente via `_delete_ignore_not_found` em cada recurso
     individualmente -- chamar de novo depois de já ter deletado tudo (ou
