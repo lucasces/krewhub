@@ -90,8 +90,10 @@ def _verify_session_checked(token: str) -> str:
     Levanta `auth.AuthTokenError` pros dois casos (mesmo tipo de
     excecao de sempre) -- os tres call sites (`root`, `require_session`,
     `logout`) ja tratam esse tipo de erro do jeito certo pra cada um
-    (401, 302 pro /login, ou melhor-esforco); nenhum shape de erro
-    novo precisou ser introduzido.
+    (401, 302 pro /login, ou melhor-esforco). Uma falha ao LER a geracao
+    no SQLite propaga como `sqlite3.Error` -- nao e credencial invalida,
+    entao cada call site trata a parte (503 em `require_session`; "nao
+    verificado" em `root`/`logout`).
 
     Checagem de geracao deliberadamente FORA de app/auth.py -- mantem
     aquele modulo um validador puro de HMAC/expiracao, sem dependencia
@@ -123,7 +125,8 @@ def require_session(request: Request) -> str:
 
     Sem credencial nenhuma, ou credencial invalida/expirada -- 401 (ou
     302 pro /login se quem chamou parece ser um browser navegando, ver
-    _wants_html)."""
+    _wants_html). SQLite indisponivel ao ler a geracao de sessao -- 503
+    (JSON, mesmo pra browser: mandar pro /login nao resolveria nada)."""
     token = _extract_token(request)
     if not token:
         if _wants_html(request):
@@ -141,6 +144,12 @@ def require_session(request: Request) -> str:
         if _wants_html(request):
             raise AuthRedirect("/login") from exc
         raise HTTPException(status_code=401, detail=f"credencial invalida: {exc}") from exc
+    except sqlite3.Error as exc:
+        logger.error("falha ao ler a geracao de sessao no SQLite", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="verificacao de sessao indisponivel (falha no SQLite) -- tente de novo",
+        ) from exc
 
 
 def require_owner(owner_id: str, request: Request) -> str:
@@ -204,7 +213,8 @@ def root(request: Request) -> RedirectResponse:
     programatica sem `Accept: text/html` -- com sessao valida, 302 pro
     lobby do owner_id extraido do PROPRIO cookie/token (nunca de query
     param); sem token, token expirado, assinatura invalida ou payload
-    malformado (qualquer `AuthTokenError`), 302 pro /login. `/login` e
+    malformado (qualquer `AuthTokenError`), ou falha do SQLite ao ler a
+    geracao de sessao (logada como erro), 302 pro /login. `/login` e
     `/callback` nao verificam sessao nem olham pra `/` -- so redirecionam
     PRA FRENTE (IdP e lobby, respectivamente), entao nao ha como esta
     rota fechar um loop com nenhuma das duas. `Cache-Control: no-store`
@@ -216,6 +226,9 @@ def root(request: Request) -> RedirectResponse:
         try:
             owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
+            owner_id = None
+        except sqlite3.Error:
+            logger.error("falha ao ler a geracao de sessao no SQLite em /", exc_info=True)
             owner_id = None
     target = f"/devs/{urllib.parse.quote(owner_id, safe='')}/lobby" if owner_id else "/login"
     return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
@@ -484,6 +497,11 @@ def logout(request: Request) -> RedirectResponse:
         try:
             owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
+            owner_id = None
+        except sqlite3.Error:
+            # Sem conseguir verificar, nao ha owner_id confiavel pra
+            # bump/teardown -- so limpa o cookie e redireciona.
+            logger.error("falha ao ler a geracao de sessao no SQLite em /logout", exc_info=True)
             owner_id = None
     if owner_id:
         # Incrementa a geracao de sessao PRIMEIRO (tabela propria

@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
+import sqlite3
 import time
 import urllib.parse
 from unittest import mock
@@ -416,3 +418,49 @@ def test_full_relogin_cycle_after_logout_issues_working_token(
     assert r_new.status_code == 200
     r_old = client.get(f"/devs/{_path(OWNER_A)}", headers={"Authorization": f"Bearer {old_token}"})
     assert r_old.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Falha de SQLite ao ler a geracao durante a verificacao
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def broken_generation_read(monkeypatch):
+    def _raise(_conn, _owner_id):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(store, "get_session_generation", _raise)
+
+
+def test_root_redirects_to_login_when_generation_read_fails(
+    client, sign_cookie, broken_generation_read, caplog
+):
+    client.cookies.set("krewhub_session", sign_cookie(OWNER_A))
+    with caplog.at_level(logging.ERROR, logger="krewhub"):
+        r = client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
+    assert any(rec.levelno == logging.ERROR for rec in caplog.records)
+
+
+def test_logout_clears_cookie_when_generation_read_fails(
+    client, sign_cookie, infra, broken_generation_read, caplog
+):
+    client.cookies.set("krewhub_session", sign_cookie(OWNER_A))
+    with caplog.at_level(logging.ERROR, logger="krewhub"):
+        _assert_cookie_cleared(client.get("/logout", follow_redirects=False))
+    assert infra["teardown"] == []
+    assert any(rec.levelno == logging.ERROR for rec in caplog.records)
+
+
+@pytest.mark.parametrize("accept", [None, "text/html"])
+def test_protected_route_returns_503_when_generation_read_fails(
+    client, sign_cookie, broken_generation_read, accept
+):
+    headers = {"Authorization": f"Bearer {sign_cookie(OWNER_A)}"}
+    if accept:
+        headers["Accept"] = accept
+    r = client.get(f"/devs/{_path(OWNER_A)}", headers=headers, follow_redirects=False)
+    assert r.status_code == 503
+    assert "detail" in r.json()
