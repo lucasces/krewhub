@@ -607,7 +607,7 @@ def new_session(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
 
 
 @app.get("/devs/{owner_id}/open")
-def open_dashboard(owner_id: str) -> RedirectResponse:
+def open_dashboard(owner_id: str, _owner: str = Depends(require_owner)) -> RedirectResponse:
     """Entrypoint pensado pra ser aberto direto no navegador: reconcilia
     o workload (idempotente, `_do_provision` -- rápido quando o pod já
     existe) e devolve HTTP 302 pra URL já autenticada -- simula "login
@@ -619,7 +619,16 @@ def open_dashboard(owner_id: str) -> RedirectResponse:
     sem isso, um `/open` batido depois de um
     `/close` anterior (ex.: link salvo/favoritado) falharia com 502
     ("nenhum pod Running") em vez de reconstruir o pod do zero -- mesma
-    garantia que `/provision`/`/lobby` já davam."""
+    garantia que `/provision`/`/lobby` já davam.
+
+    Protegido por `require_owner`, mesmo guard de `/lobby`. Sem sessão
+    (cookie ausente/expirado) e navegação de browser: 302 pro `/login`
+    (fluxo completo termina no PRÓPRIO lobby do dev, não de volta aqui --
+    não há passthrough de "voltar pra URL original" através do OIDC,
+    trade-off aceito). Chamada programática sem sessão: 401 JSON. Sessão
+    válida mas de OUTRO owner_id (ex.: link salvo/favoritado de outro dev):
+    sempre 403 -- isso é falha de autorização, nunca vira um redirect
+    silencioso pro /login."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
@@ -976,15 +985,10 @@ def lobby_submit(
     )
 
 
-@app.get("/devs")
-def list_devs() -> list[dict]:
-    with store.connect(_settings.db_path) as conn:
-        rows = store.list_all(conn)
-    return [dict(r) for r in rows]
-
-
 @app.get("/devs/{owner_id}")
-def get_dev(owner_id: str) -> dict:
+def get_dev(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+    """Lookup do registro de um dev específico. Protegido por
+    `require_owner` (mesmo guard de `/provision`/`/session`/`/lobby`)."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:

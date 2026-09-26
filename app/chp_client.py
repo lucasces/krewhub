@@ -72,15 +72,6 @@ def register_route(c: Clients, settings, *, host: str, target: str) -> dict:
     return {"host": host, "target": target, "status": status}
 
 
-def list_routes(c: Clients, settings) -> str:
-    pod_name = _find_chp_pod(c, settings.chp_namespace, settings.chp_pod_label)
-    curl_cmd = (
-        f'curl -s -H "Authorization: token $CONFIGPROXY_AUTH_TOKEN" '
-        f"http://localhost:{settings.chp_admin_port}/api/routes"
-    )
-    return _exec_curl(c, settings.chp_namespace, pod_name, curl_cmd)
-
-
 def _parse_status(raw: str) -> int:
     for line in raw.splitlines():
         if line.startswith("HTTP_STATUS:"):

@@ -144,7 +144,3 @@ def mark_token_issued(conn: sqlite3.Connection, owner_id: str) -> None:
         (_now(), _now(), owner_id),
     )
     conn.commit()
-
-
-def list_all(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM devs ORDER BY created_at").fetchall()

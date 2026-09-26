@@ -160,12 +160,6 @@ intact, so a subsequent provision picks up where it left off); `GET
 
 - **No automatic idle culling** — pods stay up until someone calls
   `/close`/`/logout` manually, or an operator tears them down by hand.
-- **Internal endpoint authentication isn't fully locked down**: `GET
-  /devs` (general listing) is deliberately left open while only one
-  operator uses the service; `GET /devs/{owner_id}` and `GET
-  /devs/{owner_id}/open` still don't require a credential. See
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the mechanism
-  behind the endpoints that are already protected.
 - **KrewHub's own session is a stateless HMAC token** — `/logout`
   clears the browser cookie, but there's no server-side revocation of
   that specific token (unlike the `kirocrew` session itself, which has

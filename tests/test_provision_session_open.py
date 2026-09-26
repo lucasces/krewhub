@@ -134,7 +134,7 @@ def test_session_requires_auth(client, mocked_infra):
     assert r.status_code == 401
 
 
-def test_open_redirects_with_token_embedded(client, mocked_infra, settings):
+def test_open_redirects_with_token_embedded(client, mocked_infra, settings, sign_cookie):
     with store.connect(settings.db_path) as conn:
         store.upsert(
             conn,
@@ -144,11 +144,55 @@ def test_open_redirects_with_token_embedded(client, mocked_infra, settings):
             host="dev-a-test-local.kiro.internal",
             status="routed",
         )
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
     r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"].startswith("http://dev-a-test-local.kiro.internal:8080/?token=")
 
 
-def test_open_404_when_never_provisioned(client, mocked_infra):
+def test_open_404_when_never_provisioned(client, mocked_infra, sign_cookie):
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
     r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
     assert r.status_code == 404
+
+
+def test_open_requires_auth(client, mocked_infra):
+    """Chamada programatica (sem 'Accept: text/html') sem sessao -- 401
+    JSON, mesma convencao de /provision e /session."""
+    r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
+    assert r.status_code == 401
+
+
+def test_open_redirects_to_login_for_browser_navigation_without_session(client, mocked_infra):
+    """Navegacao de browser (Accept: text/html) sem sessao -- 302 pro
+    /login em vez de um 401 cru, mesma convencao de GET /. Cobre o caso
+    de um link salvo/favoritado batido com cookie ausente ou expirado:
+    o dev acaba num login/lobby proprio, nao de volta neste /open."""
+    r = client.get(
+        "/devs/dev-a%40test.local/open",
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
+    assert r.headers["location"] == "/login"
+
+
+def test_open_rejects_cross_owner_credential(client, mocked_infra, sign_cookie):
+    client.cookies.set("krewhub_session", sign_cookie("dev-b@test.local"))
+    r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
+    assert r.status_code == 403
+
+
+def test_open_rejects_cross_owner_even_for_browser_navigation(client, mocked_infra, sign_cookie):
+    """Sessao valida mas de OUTRO owner_id (ex.: link salvo/favoritado de
+    outro dev) -- sempre 403, mesmo quando quem chamou parece um browser
+    navegando. Nao pode virar um redirect silencioso pro /login: isso
+    esconderia uma falha real de autorizacao atras de uma tela de
+    login."""
+    client.cookies.set("krewhub_session", sign_cookie("dev-b@test.local"))
+    r = client.get(
+        "/devs/dev-a%40test.local/open",
+        headers={"accept": "text/html"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 403

@@ -44,7 +44,7 @@ jobs:
           # domain/StorageClass/secret name) -- only exists to satisfy the
           # chart's `required()` fields (chp.adminToken.existingSecretName)
           # so `helm template` renders end to end. Not related to
-          # charts/krewhub/examples/values-family-cluster.yaml, which is
+          # charts/krewhub/examples/values-<your-cluster>.yaml, which is
           # real-cluster-specific and gitignored/untracked -- never
           # available to CI and never referenced here.
           cat > /tmp/ci-fictitious-values.yaml <<'YAML'

@@ -7,13 +7,10 @@ This project publishes two artifacts on every release: the
 [`.github/workflows/release.yml`](.github/workflows/release.yml),
 triggered by pushing a tag matching `v*`.
 
-Pushing the tag *is* the release action. There is no manual approval
-gate in front of publishing: `release.yml` runs the CI checks first
+Pushing the tag *is* the release action; there is no manual approval
+gate in front of publishing. `release.yml` runs the CI checks first
 (`needs:` on the same test/lint job used for every push and PR), then
-builds and pushes the image and the chart automatically. For a
-solo-maintainer project, the deliberate act of tagging and pushing is
-considered sufficient intent -- an extra required-reviewer step on top
-of that was evaluated and dropped as redundant.
+builds and pushes the image and the chart automatically.
 
 Confirm, in **Settings → Actions → General → Workflow permissions**,
 that "Read and write permissions" is selected (or that `packages: write`
@@ -65,14 +62,13 @@ push to `main` and every pull request:
 - `helm lint charts/krewhub`.
 - `helm template` against a throwaway, fully generic/fictitious values
   file (built inline in the workflow — never
-  `charts/krewhub/examples/values-family-cluster.yaml`, which documents
-  one specific real cluster, is gitignored, and is never available to
-  CI or the published chart).
+  `charts/krewhub/examples/values-<your-cluster>.yaml`, which
+  documents one specific real cluster, is gitignored, and is never
+  available to CI or the published chart).
 
 The chart-publish job additionally re-verifies, on the packaged `.tgz`
 itself, that `examples/` and any `values-*.yaml` never leak into the
-artifact — the same check that was done by hand earlier in this
-project, now enforced on every release.
+artifact.
 
 ## Auth
 

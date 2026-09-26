@@ -139,11 +139,14 @@ generic/empty).
 
 ## Project conventions
 
-- Never commit a third-party client/company/domain name — not in code,
-  commit messages, or config comments (`.gitignore` included).
-  Third-party environment configs stay untracked (e.g. under
-  `deploy/<environment-name>/`), with no explicit `.gitignore` entry —
-  they simply never get `git add`ed.
+- Never commit anything identifying a third-party client, company,
+  domain, or person — not in code, commit messages, or as literal
+  text in `.gitignore` itself (an entry like `deploy/acme-corp/`
+  would leak the name into version control even as an ignore rule).
+  The one `.gitignore` entry that exists for this class of file,
+  `values-*.yaml`, is a generic filename pattern that names no third
+  party — it's what keeps a real, filled-in cluster values file (e.g.
+  `charts/krewhub/examples/values-<your-cluster>.yaml`) out of git.
 - The Helm chart is generic by design — no default value in
   `charts/krewhub/values.yaml` assumes a specific cluster
   (StorageClass, domain, node topology, secret mechanism). Examples of
@@ -158,3 +161,40 @@ generic/empty).
   `CLAUDE.md`, `docs/*.md`) is written in English — permanent
   convention, not a one-off. Inline code comments/docstrings stay in
   Portuguese for now, unaffected by this.
+- Commit messages are always in English, no exceptions, same as the
+  markdown convention above.
+
+## Editing third-party-facing docs
+
+Every `*.md` file in this repo except `AGENTS.md`/`CLAUDE.md`
+themselves (`README.md`, `RELEASING.md`, `docs/ARCHITECTURE.md`, and
+any future doc file) is third-party/end-user facing. It must read as
+clean, objective, standalone documentation — zero trace of how or why
+an AI assistant arrived at the content. Checklist:
+
+- **No process/session narration.** No "the agent", "this session",
+  "we decided", "was evaluated", "at this point", "previously", no
+  turn-by-turn reasoning, no hedging filler ("it's worth noting
+  that", "it should be mentioned"). State facts directly.
+- **No circular/empty statements.** Every sentence must convey a
+  concrete, non-obvious fact. Reject anything that just restates its
+  own heading or something already implied.
+- **No dangling contrast.** Don't leave a sentence that only makes
+  sense in reference to something else that has since been
+  removed/changed elsewhere in the docs or the code. If the thing it
+  contrasts against goes away, re-check the sentence.
+- **No cross-doc/cross-section redundancy** — with one legitimate
+  exception: deliberately repeating a fact for the skimmability of a
+  runbook-style section (e.g. `RELEASING.md`'s "Cutting a release
+  candidate" section restating that there's no approval gate, so it
+  reads standalone). Call this out explicitly when it's the reason;
+  otherwise, redundancy is a bug.
+- **"Known limitations" (or similarly named) sections**: every bullet
+  must describe an actual gap or weakness — something concretely
+  missing, or gated by a specific condition. A bullet describing
+  correct/expected behavior (e.g. "endpoint X requires auth") doesn't
+  belong there.
+- **When editing a doc because code/architecture changed**, don't
+  just append new text — re-read the surrounding section for now-
+  dangling references, redundant restatements, or context that no
+  longer applies, and clean those up in the same change.

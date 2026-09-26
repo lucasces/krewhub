@@ -55,12 +55,17 @@ A valid credential for an `owner_id` different from the one in the URL
 (programmatic call) or a `302` to `/login` (browser navigation, via
 `Accept: text/html`).
 
-**Known gaps, deliberately tracked (not forgotten):** `GET /devs`
-(general listing) is left open on purpose while only one operator uses
-the service — it becomes a real blocker with more than one operator,
-or exposure beyond the operator's own network. `GET /devs/{owner_id}`
-(lookup) and `GET /devs/{owner_id}/open` (issues a dashboard token and
-redirects) still don't have this protection.
+`GET /devs/{owner_id}/open` is reachable as a plain browser link (a
+dashboard bookmark, for instance), so it follows the same convention as
+`GET /`: a missing or expired session on browser navigation
+(`Accept: text/html`) yields a `302` to `/login` instead of a raw `401`
+— the dev ends up back at their own lobby, not necessarily back at the
+original `/open` link, since there is no passthrough of the originally
+requested URL through the OIDC flow. A programmatic call without a
+session still gets a plain `401`. A valid session for a *different*
+`owner_id` (e.g. a link bookmarked by another dev) always gets `403`,
+never a silent redirect — that case is a real authorization failure,
+not a missing-login case.
 
 ## `/close` vs `/logout`
 
