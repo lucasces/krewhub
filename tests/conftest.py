@@ -77,11 +77,12 @@ def sign_cookie(settings):
     mesmo helper (`auth.sign_session`) que `/callback` usa de verdade,
     não uma segunda implementação."""
 
-    def _sign(owner_id: str, *, ttl_seconds: int | None = None) -> str:
+    def _sign(owner_id: str, *, ttl_seconds: int | None = None, gen: int = 0) -> str:
         return auth.sign_session(
             owner_id,
             secret=settings.session_secret,
             ttl_seconds=settings.auth_token_ttl_seconds if ttl_seconds is None else ttl_seconds,
+            gen=gen,
         )
 
     return _sign

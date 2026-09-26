@@ -39,15 +39,28 @@ HTTP internally) **or** an equivalent `Authorization: Bearer <token>`
 header, for programmatic calls that don't rely on a browser cookie.
 
 The token is signed locally (`app/auth.py`, HMAC-SHA256 over
-`{owner_id, exp}`), not the IdP's `access_token` — a deliberate
+`{owner_id, exp, gen}`), not the IdP's `access_token` — a deliberate
 decision: validating the IdP's `access_token` via JWKS would also
 work, but a dedicated token avoids depending on network access to the
 IdP on every protected request, and avoids spreading a token that
 carries IdP scope/permissions (not just identity) further than
-necessary. Consequence: since it's stateless HMAC, there's no
-server-side revocation of that token — `/logout` clears the browser
-cookie, but deliberately resending an old token still authenticates
-until its natural `exp`.
+necessary.
+
+Revocation: each `owner_id` has a session generation counter in the
+SQLite store (`app/store.py`, table `session_generations`, separate
+from the per-dev records); an `owner_id` with no row there is at
+generation 0. Every signed token embeds (`gen`) the generation that was
+current when it was issued, and verification compares that value
+against the stored one for the same `owner_id`, in addition to the
+HMAC signature and expiry. `GET /logout` increments the counter and
+`GET /close` does not (see [`/close` vs `/logout`](#close-vs-logout));
+an increment invalidates every token issued for that `owner_id` before
+it, including ones held by other tabs or devices, without a call to
+the IdP. A token without a `gen` field is treated as generation 0, so
+tokens issued before the field existed stay valid until the owner's
+next `/logout` or their own `exp`. If the store can't be read during
+verification, protected endpoints return `503` and `GET /` redirects
+to `/login`.
 
 A valid credential for an `owner_id` different from the one in the URL
 → explicit `403` (this is what stops one dev from calling
@@ -73,9 +86,17 @@ Two different concepts: **`/close`** ends only the dashboard's
 (`kirocrew`) work session — real, server-side revocation, via a `POST
 /api/logout` local to the pod (`kirocrew` bumps a generation counter
 persisted to disk; already-issued `mc_token_*`/`mc_refresh_*` cookies
-get rejected on the next request). The dev stays logged into KrewHub.
-**`/logout`** does the same revocation **and** clears the
-`krewhub_session` cookie **and** redirects to `/login`.
+get rejected on the next request). The dev stays logged into KrewHub:
+`/close` leaves the session generation unchanged, so the
+`krewhub_session` token keeps working. **`/logout`** first increments
+the `owner_id`'s session generation (see
+[Authentication for KrewHub's own endpoints](#authentication-for-krewhubs-own-endpoints)),
+which revokes every `krewhub_session` token issued for it so far, then
+does the same `kirocrew` revocation and workload teardown (below) as
+`/close`, clears the `krewhub_session` cookie, and redirects to `/login`. In
+`/logout` that revocation and teardown are best-effort: a failure there
+(for example an unreachable cluster) is logged instead of returned, and
+the generation increment has already taken effect.
 
 The dashboard's cookies (`mc_token_*`/`mc_refresh_*`) are host-only (no
 `Domain` attribute), and `krewhub-central` responds from a different
@@ -84,7 +105,7 @@ incapable of setting/expiring those cookies in the browser
 (cross-origin). The only way to end that session is the server-side
 revocation above, never a cleanup `Set-Cookie` coming from KrewHub.
 
-Besides revoking the session, both endpoints also tear down the dev's
+Besides revoking the `kirocrew` session, both endpoints also tear down the dev's
 k8s workload (Deployment/Service/NetworkPolicy/ConfigMap) — manual,
 per-dev, on-demand culling. **PVC (`kiro-workspace-<slug>`) and Secret
 (`kiro-owner-id-<slug>`) are never touched**, either by the app or by

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html
 import logging
+import sqlite3
 import urllib.parse
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
@@ -77,6 +78,41 @@ def _extract_token(request: Request) -> str | None:
     return request.cookies.get(AUTH_COOKIE_NAME)
 
 
+def _verify_session_checked(token: str) -> str:
+    """Valida o token (assinatura + expiracao, via
+    `auth.verify_session_payload`) E confere que a geracao embutida
+    nele ainda bate com a geracao atual persistida pro owner_id
+    (tabela `session_generations`, ver app/store.py) -- e o que da revogacao de
+    verdade pro `krewhub_session` (issue #2): um token assinado ANTES
+    de um `/logout` (que incrementa a geracao) passa a falhar aqui,
+    mesmo com assinatura/expiracao ainda validas.
+
+    Levanta `auth.AuthTokenError` pros dois casos (mesmo tipo de
+    excecao de sempre) -- os tres call sites (`root`, `require_session`,
+    `logout`) ja tratam esse tipo de erro do jeito certo pra cada um
+    (401, 302 pro /login, ou melhor-esforco). Uma falha ao LER a geracao
+    no SQLite propaga como `sqlite3.Error` -- nao e credencial invalida,
+    entao cada call site trata a parte (503 em `require_session`; "nao
+    verificado" em `root`/`logout`).
+
+    Checagem de geracao deliberadamente FORA de app/auth.py -- mantem
+    aquele modulo um validador puro de HMAC/expiracao, sem dependencia
+    de SQLite (tests/test_auth_tokens.py continua rodando sem banco
+    nenhum)."""
+    payload = auth.verify_session_payload(token, secret=_settings.session_secret)
+    owner_id = payload["owner_id"]
+    with store.connect(_settings.db_path) as conn:
+        current_gen = store.get_session_generation(conn, owner_id)
+    if payload["gen"] != current_gen:
+        raise auth.AuthTokenError(
+            f"sessao revogada -- geracao do token ({payload['gen']}) nao bate "
+            f"com a atual ({current_gen}) pro owner_id '{owner_id}', "
+            "provavelmente por causa de um /logout depois deste token ter "
+            "sido emitido"
+        )
+    return owner_id
+
+
 def require_session(request: Request) -> str:
     """Dependencia FastAPI pros endpoints que agem sobre 'a sessao de
     quem chamou' SEM um owner_id na URL pra comparar (ex.: `/close`,
@@ -89,7 +125,8 @@ def require_session(request: Request) -> str:
 
     Sem credencial nenhuma, ou credencial invalida/expirada -- 401 (ou
     302 pro /login se quem chamou parece ser um browser navegando, ver
-    _wants_html)."""
+    _wants_html). SQLite indisponivel ao ler a geracao de sessao -- 503
+    (JSON, mesmo pra browser: mandar pro /login nao resolveria nada)."""
     token = _extract_token(request)
     if not token:
         if _wants_html(request):
@@ -102,11 +139,17 @@ def require_session(request: Request) -> str:
             ),
         )
     try:
-        return auth.verify_session(token, secret=_settings.session_secret)
+        return _verify_session_checked(token)
     except auth.AuthTokenError as exc:
         if _wants_html(request):
             raise AuthRedirect("/login") from exc
         raise HTTPException(status_code=401, detail=f"credencial invalida: {exc}") from exc
+    except sqlite3.Error as exc:
+        logger.error("falha ao ler a geracao de sessao no SQLite", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="verificacao de sessao indisponivel (falha no SQLite) -- tente de novo",
+        ) from exc
 
 
 def require_owner(owner_id: str, request: Request) -> str:
@@ -163,14 +206,15 @@ def healthz() -> dict:
 def root(request: Request) -> RedirectResponse:
     """Entrypoint de `krewhub.kiro.internal` (raiz, sem owner_id na URL
     -- diferente de /devs/{owner_id}/*). Reaproveita a MESMA verificacao
-    de `auth.verify_session` (+ `_extract_token`) ja usada por
-    `require_owner` -- nao duplica logica de validacao HMAC/expiracao
-    numa segunda implementacao. Diferenca deliberada em relacao a
+    de `_verify_session_checked` (+ `_extract_token`) ja usada por
+    `require_owner` -- nao duplica logica de validacao HMAC/expiracao/
+    geracao numa segunda implementacao. Diferenca deliberada em relacao a
     `require_owner`: aqui NUNCA deixa vazar 401/500 cru, nem pra chamada
     programatica sem `Accept: text/html` -- com sessao valida, 302 pro
     lobby do owner_id extraido do PROPRIO cookie/token (nunca de query
     param); sem token, token expirado, assinatura invalida ou payload
-    malformado (qualquer `AuthTokenError`), 302 pro /login. `/login` e
+    malformado (qualquer `AuthTokenError`), ou falha do SQLite ao ler a
+    geracao de sessao (logada como erro), 302 pro /login. `/login` e
     `/callback` nao verificam sessao nem olham pra `/` -- so redirecionam
     PRA FRENTE (IdP e lobby, respectivamente), entao nao ha como esta
     rota fechar um loop com nenhuma das duas. `Cache-Control: no-store`
@@ -180,8 +224,11 @@ def root(request: Request) -> RedirectResponse:
     owner_id: str | None = None
     if token:
         try:
-            owner_id = auth.verify_session(token, secret=_settings.session_secret)
+            owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
+            owner_id = None
+        except sqlite3.Error:
+            logger.error("falha ao ler a geracao de sessao no SQLite em /", exc_info=True)
             owner_id = None
     target = f"/devs/{urllib.parse.quote(owner_id, safe='')}/lobby" if owner_id else "/login"
     return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
@@ -265,9 +312,14 @@ def callback(
     redirect = RedirectResponse(
         f"/devs/{urllib.parse.quote(owner_id, safe='')}/lobby", status_code=302
     )
+    with store.connect(_settings.db_path) as conn:
+        current_gen = store.get_session_generation(conn, owner_id)
     try:
         session_token = auth.sign_session(
-            owner_id, secret=_settings.session_secret, ttl_seconds=_settings.auth_token_ttl_seconds
+            owner_id,
+            secret=_settings.session_secret,
+            ttl_seconds=_settings.auth_token_ttl_seconds,
+            gen=current_gen,
         )
     except auth.AuthTokenError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
@@ -415,12 +467,17 @@ def logout(request: Request) -> RedirectResponse:
     `/login` simplesmente começa um ciclo OIDC novo do zero, decisão
     deliberada.
 
+    Antes do teardown, incrementa a geracao de sessao do owner_id
+    (`store.bump_session_generation`) -- revoga TODO `krewhub_session`
+    ja emitido pra ele, inclusive em outras abas/dispositivos, mesmo que
+    o teardown falhe depois. `/close` NAO faz isso.
+
     TUDO que `_close_dev_session` faz é MELHOR ESFORÇO aqui -- diferente
     de `/close` (onde uma falha REAL de teardown vira 502), uma falha
     aqui (owner nunca provisionado, revogação ou teardown indisponível,
-    etc.) NÃO pode impedir o logout do KrewHub em si (limpar cookie +
-    redirect) -- mantém a garantia já testada de `/logout` nunca vazar
-    erro.
+    cluster inacessível, etc.) NÃO pode impedir o logout do KrewHub em
+    si (limpar cookie + redirect) -- mantém a garantia já testada de
+    `/logout` nunca vazar erro.
 
     `GET` simples, não `POST`/form -- a ação só afeta a sessão/workload
     de QUEM chamou (não muda estado de outro owner_id, não expõe nada
@@ -435,18 +492,46 @@ def logout(request: Request) -> RedirectResponse:
     é a sessão pra limpar o cookie -- só precisa saber, quando dá, pra
     tentar a revogação/teardown também)."""
     token = _extract_token(request)
+    owner_id: str | None = None
     if token:
         try:
-            owner_id = auth.verify_session(token, secret=_settings.session_secret)
+            owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
             owner_id = None
-        if owner_id:
-            try:
-                _close_dev_session(owner_id)
-            except (ValueError, k8s_manager.TeardownError):
-                logger.warning(
-                    "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
-                )
+        except sqlite3.Error:
+            # Sem conseguir verificar, nao ha owner_id confiavel pra
+            # bump/teardown -- so limpa o cookie e redireciona.
+            logger.error("falha ao ler a geracao de sessao no SQLite em /logout", exc_info=True)
+            owner_id = None
+    if owner_id:
+        # Incrementa a geracao de sessao PRIMEIRO (tabela propria
+        # `session_generations`, nunca uma linha em `devs` -- ver
+        # app/store.py) -- e o que da revogacao de verdade pro proprio
+        # krewhub_session (issue #2), e nao pode depender do teardown
+        # abaixo dar certo: justamente com a infra fora do ar, o token
+        # antigo tem que deixar de valer. Uma falha aqui (SQLite
+        # indisponivel) nao pode impedir o logout do KrewHub em si
+        # (limpar cookie + redirect).
+        try:
+            with store.connect(_settings.db_path) as conn:
+                store.bump_session_generation(conn, owner_id)
+        except sqlite3.Error:
+            logger.error(
+                "falha ao incrementar a geracao de sessao no /logout pra owner_id=%s",
+                owner_id,
+                exc_info=True,
+            )
+        # Teardown melhor esforco -- QUALQUER excecao (nao so
+        # TeardownError: get_clients pode levantar RuntimeError com
+        # kubeconfig/cluster indisponivel) so e logada.
+        try:
+            _close_dev_session(owner_id)
+        except ValueError:
+            logger.info("/logout pra owner_id=%s sem workload provisionado -- nada a desligar", owner_id)
+        except Exception:
+            logger.warning(
+                "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
+            )
 
     redirect = RedirectResponse("/login", status_code=302)
     # Mesmo critério de is_https já usado no /callback ao SETAR o cookie

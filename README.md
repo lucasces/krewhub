@@ -154,16 +154,14 @@ already authenticated.
 To end a session: `GET /close` ends the dashboard's work session and
 tears down the dev's k8s workload (keeping workspace and credential
 intact, so a subsequent provision picks up where it left off); `GET
-/logout` does the same and also logs out of KrewHub.
+/logout` does the same and also logs out of KrewHub. Logout revokes
+every KrewHub session of that dev, so it ends the session on all their
+browsers and devices, not only the one it was called from.
 
 ## Known limitations
 
 - **No automatic idle culling** — pods stay up until someone calls
   `/close`/`/logout` manually, or an operator tears them down by hand.
-- **KrewHub's own session is a stateless HMAC token** — `/logout`
-  clears the browser cookie, but there's no server-side revocation of
-  that specific token (unlike the `kirocrew` session itself, which has
-  real revocation).
 - **The Helm chart isn't yet validated as the sole deployment
   mechanism** in production across every environment — it works
   (`helm lint`/`helm template` without errors), but depends on correct
