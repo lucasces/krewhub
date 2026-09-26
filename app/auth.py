@@ -119,6 +119,8 @@ def verify_session_payload(token: str, *, secret: str) -> dict:
     if time.time() > exp:
         raise AuthTokenError("token expirado")
     gen = payload.get("gen", 0)
-    if not isinstance(gen, int):
+    # `type(...) is int`, nao `isinstance` -- bool e subclasse de int,
+    # entao `"gen": true` passaria como geracao 1.
+    if type(gen) is not int:
         raise AuthTokenError("payload com 'gen' invalido")
     return {"owner_id": owner_id, "exp": exp, "gen": gen}

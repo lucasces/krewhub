@@ -142,6 +142,25 @@ def test_verify_session_still_returns_plain_owner_id_unaffected_by_gen():
     assert auth.verify_session(token, secret="s") == OWNER_A
 
 
+def test_verify_session_payload_rejects_boolean_gen():
+    """`True` e subclasse de `int` em Python -- `isinstance` aceitaria
+    `"gen": true` como geracao 1."""
+    token = auth.sign_session(OWNER_A, secret="s", ttl_seconds=60, gen=True)
+    with pytest.raises(auth.AuthTokenError):
+        auth.verify_session_payload(token, secret="s")
+
+
+def test_boolean_gen_token_rejected_when_current_generation_is_one(client, settings):
+    _provision(settings, OWNER_A)
+    with store.connect(settings.db_path) as conn:
+        assert store.bump_session_generation(conn, OWNER_A) == 1
+    token = auth.sign_session(
+        OWNER_A, secret=settings.session_secret, ttl_seconds=3600, gen=True
+    )
+    r = client.get(f"/devs/{_path(OWNER_A)}", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 401
+
+
 def test_legacy_token_without_gen_is_accepted_at_generation_zero_and_rejected_after_bump(
     client, settings
 ):
