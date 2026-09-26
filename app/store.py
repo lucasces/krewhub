@@ -22,6 +22,24 @@ CREATE TABLE IF NOT EXISTS devs (
 );
 """
 
+# Contador de geracao de sessao por owner_id -- ver app/auth.py (payload
+# do token ganha um campo "gen") e _verify_session_checked/logout em
+# app/main.py. /logout incrementa; qualquer token assinado ANTES do
+# incremento passa a falhar a verificacao (geracao esperada != geracao
+# no token), mesmo com assinatura e expiracao ainda validas -- e o que
+# da revogacao de verdade pro krewhub_session (issue #2), sem depender
+# de introspection no IdP. Tabela PROPRIA, nunca uma coluna em `devs`:
+# /logout roda tambem pra owner_id nunca provisionado, e toda checagem
+# de "nao provisionado" em app/main.py e `store.get(...) is None` --
+# criar uma linha em `devs` so pra guardar o contador faria esse owner
+# parecer provisionado (namespace/slug vazios). Sem linha = geracao 0.
+SESSION_GENERATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_generations (
+    owner_id   TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL
+);
+"""
+
 # Migração leve pra bancos já criados antes desta coluna existir --
 # CREATE TABLE IF NOT EXISTS não adiciona coluna em tabela já existente.
 # NUNCA guarda o token de sessão em si (é credencial) -- só quando foi
@@ -36,15 +54,6 @@ _MIGRATIONS = (
     "ALTER TABLE devs ADD COLUMN login_mode TEXT",
     "ALTER TABLE devs ADD COLUMN login_identity_provider TEXT",
     "ALTER TABLE devs ADD COLUMN login_region TEXT",
-    # Contador de geracao de sessao -- ver app/auth.py (payload do token
-    # ganha um campo "gen") e require_session/logout em app/main.py.
-    # Comeca em 0 pra bater com token assinado sem geracao explicita
-    # (auth.sign_session(gen=0), default). /logout incrementa; qualquer
-    # token assinado ANTES do incremento passa a falhar a verificacao
-    # (mesma geracao esperada != geracao no token), mesmo com assinatura
-    # e expiracao ainda validas -- e o que da revogacao de verdade pro
-    # krewhub_session (issue #2), sem depender de introspection no IdP.
-    "ALTER TABLE devs ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -57,6 +66,7 @@ def connect(db_path: str) -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute(SCHEMA)
+    conn.execute(SESSION_GENERATIONS_SCHEMA)
     for migration in _MIGRATIONS:
         try:
             conn.execute(migration)
@@ -156,34 +166,27 @@ def mark_token_issued(conn: sqlite3.Connection, owner_id: str) -> None:
 
 
 def get_session_generation(conn: sqlite3.Connection, owner_id: str) -> int:
-    """Geracao atual de sessao pro owner_id -- 0 se a linha nao existe
-    ainda (token assinado em /callback, antes de qualquer
-    provision/lobby criar a linha em devs)."""
+    """Geracao atual de sessao pro owner_id -- 0 se ainda nao ha linha
+    em `session_generations` (owner_id que nunca fez /logout)."""
     row = conn.execute(
-        "SELECT session_generation FROM devs WHERE owner_id = ?", (owner_id,)
+        "SELECT generation FROM session_generations WHERE owner_id = ?", (owner_id,)
     ).fetchone()
-    return int(row["session_generation"]) if row is not None else 0
+    return int(row["generation"]) if row is not None else 0
 
 
 def bump_session_generation(conn: sqlite3.Connection, owner_id: str) -> int:
     """Incrementa a geracao de sessao do owner_id (revoga TODO token
-    assinado antes desta chamada) e devolve o novo valor. Mesmo padrao
-    de linha-minima-em-conflito de `set_login_choice` -- /logout pode
-    ser chamado pra um owner_id que nunca foi provisionado (sem
-    namespace/host/status reais ainda)."""
-    now = _now()
+    assinado antes desta chamada) e devolve o novo valor. Upsert so em
+    `session_generations` -- nunca toca em `devs`, entao chamar isto
+    pra um owner_id nunca provisionado nao o faz parecer provisionado."""
     conn.execute(
         """
-        INSERT INTO devs (
-            owner_id, slug, namespace, host, status, detail,
-            created_at, updated_at, session_generation
-        )
-        VALUES (:owner_id, '', '', '', 'lobby_pending', '', :now, :now, 1)
+        INSERT INTO session_generations (owner_id, generation)
+        VALUES (?, 1)
         ON CONFLICT(owner_id) DO UPDATE SET
-            session_generation = devs.session_generation + 1,
-            updated_at = excluded.updated_at
+            generation = session_generations.generation + 1
         """,
-        {"owner_id": owner_id, "now": now},
+        (owner_id,),
     )
     conn.commit()
     return get_session_generation(conn, owner_id)

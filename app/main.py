@@ -82,7 +82,7 @@ def _verify_session_checked(token: str) -> str:
     """Valida o token (assinatura + expiracao, via
     `auth.verify_session_payload`) E confere que a geracao embutida
     nele ainda bate com a geracao atual persistida pro owner_id
-    (`session_generation`, ver app/store.py) -- e o que da revogacao de
+    (tabela `session_generations`, ver app/store.py) -- e o que da revogacao de
     verdade pro `krewhub_session` (issue #2): um token assinado ANTES
     de um `/logout` (que incrementa a geracao) passa a falhar aqui,
     mesmo com assinatura/expiracao ainda validas.
@@ -486,14 +486,10 @@ def logout(request: Request) -> RedirectResponse:
                 logger.warning(
                     "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
                 )
-            # Incrementa a geracao DEPOIS de _close_dev_session -- essa
-            # funcao decide "owner_id nunca provisionado" checando se ja
-            # existe linha no SQLite (ValueError se nao existir); bumpar
-            # a geracao ANTES criaria uma linha minima (mesmo padrao de
-            # set_login_choice) e faria esse owner parecer "provisionado"
-            # por engano, com namespace/slug vazios. E o que da revogacao
-            # de verdade pro proprio krewhub_session (issue #2): melhor
-            # esforco igual ao resto de /logout, uma falha aqui (SQLite
+            # Incrementa a geracao de sessao (tabela propria
+            # `session_generations`, nunca uma linha em `devs` -- ver
+            # app/store.py) -- e o que da revogacao de verdade pro proprio
+            # krewhub_session (issue #2). Uma falha aqui (SQLite
             # indisponivel) nao pode impedir o logout do KrewHub em si
             # (limpar cookie + redirect).
             try:
@@ -501,7 +497,7 @@ def logout(request: Request) -> RedirectResponse:
                     store.bump_session_generation(conn, owner_id)
             except sqlite3.Error:
                 logger.warning(
-                    "falha ao incrementar session_generation no /logout pra owner_id=%s",
+                    "falha ao incrementar a geracao de sessao no /logout pra owner_id=%s",
                     owner_id,
                     exc_info=True,
                 )

@@ -1,6 +1,7 @@
 """session_generation -- revogacao de verdade pro proprio krewhub_session
-(issue #2): /logout incrementa a geracao persistida em app/store.py;
-qualquer token assinado ANTES do incremento passa a falhar mesmo com
+(issue #2): /logout incrementa a geracao persistida em app/store.py
+(tabela `session_generations`, separada de `devs`); qualquer token
+assinado ANTES do incremento passa a falhar mesmo com
 assinatura/expiracao ainda validas. k8s/CHP/kirocrew mockados (ver
 conftest.py) -- estes testes so exercitam auth.py/store.py/main.py."""
 
@@ -106,6 +107,15 @@ def test_bump_session_generation_increments_and_persists(settings):
         assert store.bump_session_generation(conn, OWNER_A) == 2
     with store.connect(settings.db_path) as conn:
         assert store.get_session_generation(conn, OWNER_A) == 2
+
+
+def test_bump_session_generation_never_creates_a_devs_row(settings):
+    """Regressao: o contador morava em `devs`, e o bump criava uma linha
+    placeholder la -- que todos os guards de "nao provisionado"
+    (`row is None`) passavam a enxergar como provisionado."""
+    with store.connect(settings.db_path) as conn:
+        store.bump_session_generation(conn, OWNER_A)
+        assert store.get(conn, OWNER_A) is None
 
 
 def test_bump_session_generation_is_per_owner(settings):
@@ -239,6 +249,26 @@ def test_logout_bumps_generation_so_a_second_stale_tab_stops_working(
         assert after.status_code == 401
 
     assert len(infra["teardown"]) == (1 if provisioned else 0)
+
+
+def test_logout_of_never_provisioned_owner_keeps_not_provisioned_routes_at_404(
+    client, sign_cookie, settings, infra
+):
+    """Regressao: com o contador em `devs`, o bump do /logout criava uma
+    linha placeholder (slug/namespace vazios) e, apos re-login, GET
+    /devs/{owner} passava a devolver 200, /close chamava revoke/teardown
+    com namespace='' e /session tentava emitir token contra slug=''."""
+    client.cookies.set("krewhub_session", sign_cookie(OWNER_A))
+    _assert_cookie_cleared(client.get("/logout", follow_redirects=False))
+    assert _current_gen(settings, OWNER_A) == 1
+
+    # "Re-login": token novo com a geracao atual (mesmo que /callback emite).
+    client.cookies.set("krewhub_session", sign_cookie(OWNER_A, gen=1))
+
+    assert client.get(f"/devs/{_path(OWNER_A)}").status_code == 404
+    assert client.get("/close").status_code == 404
+    assert client.post(f"/devs/{_path(OWNER_A)}/session").status_code == 404
+    assert infra == {"revoke": [], "teardown": [], "issue_token": []}
 
 
 def test_logout_with_stale_token_clears_cookie_without_bump_or_teardown(

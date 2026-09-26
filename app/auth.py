@@ -52,7 +52,7 @@ def sign_session(owner_id: str, *, secret: str, ttl_seconds: int, gen: int = 0) 
     """Emite um token `<payload_b64>.<assinatura_b64>` -- payload =
     {"owner_id", "exp", "gen"} (epoch, segundos; gen = geracao de
     sessao atual do owner_id, ver app/store.py::get_session_generation).
-    `gen` default 0 cobre tanto "owner_id sem linha em devs ainda"
+    `gen` default 0 cobre tanto "owner_id que nunca fez /logout"
     quanto os testes/chamadores que nao precisam de revogacao (ver
     tests/test_auth_tokens.py). Levanta AuthTokenError (nao finge
     sucesso) se KREWHUB_SESSION_SECRET nao estiver configurada."""
@@ -87,8 +87,9 @@ def verify_session_payload(token: str, *, secret: str) -> dict:
     AuthTokenError pra QUALQUER problema (malformado, assinatura
     errada, expirado, secret ausente) -- caller decide o status HTTP
     (401/403), esta funcao nunca devolve um payload nao confiavel.
-    `gen` ausente (token de formato antigo, pre-migracao) vira 0, mesmo
-    default da coluna `session_generation`."""
+    `gen` ausente (token de formato antigo, pre-migracao) vira 0 -- a
+    mesma geracao de um owner_id sem linha em `session_generations`
+    (ver app/store.py::get_session_generation)."""
     if not secret:
         raise AuthTokenError(
             "KREWHUB_SESSION_SECRET nao configurada -- nao da pra validar sessao"
