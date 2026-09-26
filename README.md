@@ -154,7 +154,9 @@ already authenticated.
 To end a session: `GET /close` ends the dashboard's work session and
 tears down the dev's k8s workload (keeping workspace and credential
 intact, so a subsequent provision picks up where it left off); `GET
-/logout` does the same and also logs out of KrewHub.
+/logout` does the same and also logs out of KrewHub. Logout revokes
+every KrewHub session of that dev, so it ends the session on all their
+browsers and devices, not only the one it was called from.
 
 ## Known limitations
 
