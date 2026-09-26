@@ -36,6 +36,15 @@ _MIGRATIONS = (
     "ALTER TABLE devs ADD COLUMN login_mode TEXT",
     "ALTER TABLE devs ADD COLUMN login_identity_provider TEXT",
     "ALTER TABLE devs ADD COLUMN login_region TEXT",
+    # Contador de geracao de sessao -- ver app/auth.py (payload do token
+    # ganha um campo "gen") e require_session/logout em app/main.py.
+    # Comeca em 0 pra bater com token assinado sem geracao explicita
+    # (auth.sign_session(gen=0), default). /logout incrementa; qualquer
+    # token assinado ANTES do incremento passa a falhar a verificacao
+    # (mesma geracao esperada != geracao no token), mesmo com assinatura
+    # e expiracao ainda validas -- e o que da revogacao de verdade pro
+    # krewhub_session (issue #2), sem depender de introspection no IdP.
+    "ALTER TABLE devs ADD COLUMN session_generation INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -144,3 +153,37 @@ def mark_token_issued(conn: sqlite3.Connection, owner_id: str) -> None:
         (_now(), _now(), owner_id),
     )
     conn.commit()
+
+
+def get_session_generation(conn: sqlite3.Connection, owner_id: str) -> int:
+    """Geracao atual de sessao pro owner_id -- 0 se a linha nao existe
+    ainda (token assinado em /callback, antes de qualquer
+    provision/lobby criar a linha em devs)."""
+    row = conn.execute(
+        "SELECT session_generation FROM devs WHERE owner_id = ?", (owner_id,)
+    ).fetchone()
+    return int(row["session_generation"]) if row is not None else 0
+
+
+def bump_session_generation(conn: sqlite3.Connection, owner_id: str) -> int:
+    """Incrementa a geracao de sessao do owner_id (revoga TODO token
+    assinado antes desta chamada) e devolve o novo valor. Mesmo padrao
+    de linha-minima-em-conflito de `set_login_choice` -- /logout pode
+    ser chamado pra um owner_id que nunca foi provisionado (sem
+    namespace/host/status reais ainda)."""
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO devs (
+            owner_id, slug, namespace, host, status, detail,
+            created_at, updated_at, session_generation
+        )
+        VALUES (:owner_id, '', '', '', 'lobby_pending', '', :now, :now, 1)
+        ON CONFLICT(owner_id) DO UPDATE SET
+            session_generation = devs.session_generation + 1,
+            updated_at = excluded.updated_at
+        """,
+        {"owner_id": owner_id, "now": now},
+    )
+    conn.commit()
+    return get_session_generation(conn, owner_id)

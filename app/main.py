@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html
 import logging
+import sqlite3
 import urllib.parse
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
@@ -77,6 +78,39 @@ def _extract_token(request: Request) -> str | None:
     return request.cookies.get(AUTH_COOKIE_NAME)
 
 
+def _verify_session_checked(token: str) -> str:
+    """Valida o token (assinatura + expiracao, via
+    `auth.verify_session_payload`) E confere que a geracao embutida
+    nele ainda bate com a geracao atual persistida pro owner_id
+    (`session_generation`, ver app/store.py) -- e o que da revogacao de
+    verdade pro `krewhub_session` (issue #2): um token assinado ANTES
+    de um `/logout` (que incrementa a geracao) passa a falhar aqui,
+    mesmo com assinatura/expiracao ainda validas.
+
+    Levanta `auth.AuthTokenError` pros dois casos (mesmo tipo de
+    excecao de sempre) -- os tres call sites (`root`, `require_session`,
+    `logout`) ja tratam esse tipo de erro do jeito certo pra cada um
+    (401, 302 pro /login, ou melhor-esforco); nenhum shape de erro
+    novo precisou ser introduzido.
+
+    Checagem de geracao deliberadamente FORA de app/auth.py -- mantem
+    aquele modulo um validador puro de HMAC/expiracao, sem dependencia
+    de SQLite (tests/test_auth_tokens.py continua rodando sem banco
+    nenhum)."""
+    payload = auth.verify_session_payload(token, secret=_settings.session_secret)
+    owner_id = payload["owner_id"]
+    with store.connect(_settings.db_path) as conn:
+        current_gen = store.get_session_generation(conn, owner_id)
+    if payload["gen"] != current_gen:
+        raise auth.AuthTokenError(
+            f"sessao revogada -- geracao do token ({payload['gen']}) nao bate "
+            f"com a atual ({current_gen}) pro owner_id '{owner_id}', "
+            "provavelmente por causa de um /logout depois deste token ter "
+            "sido emitido"
+        )
+    return owner_id
+
+
 def require_session(request: Request) -> str:
     """Dependencia FastAPI pros endpoints que agem sobre 'a sessao de
     quem chamou' SEM um owner_id na URL pra comparar (ex.: `/close`,
@@ -102,7 +136,7 @@ def require_session(request: Request) -> str:
             ),
         )
     try:
-        return auth.verify_session(token, secret=_settings.session_secret)
+        return _verify_session_checked(token)
     except auth.AuthTokenError as exc:
         if _wants_html(request):
             raise AuthRedirect("/login") from exc
@@ -163,9 +197,9 @@ def healthz() -> dict:
 def root(request: Request) -> RedirectResponse:
     """Entrypoint de `krewhub.kiro.internal` (raiz, sem owner_id na URL
     -- diferente de /devs/{owner_id}/*). Reaproveita a MESMA verificacao
-    de `auth.verify_session` (+ `_extract_token`) ja usada por
-    `require_owner` -- nao duplica logica de validacao HMAC/expiracao
-    numa segunda implementacao. Diferenca deliberada em relacao a
+    de `_verify_session_checked` (+ `_extract_token`) ja usada por
+    `require_owner` -- nao duplica logica de validacao HMAC/expiracao/
+    geracao numa segunda implementacao. Diferenca deliberada em relacao a
     `require_owner`: aqui NUNCA deixa vazar 401/500 cru, nem pra chamada
     programatica sem `Accept: text/html` -- com sessao valida, 302 pro
     lobby do owner_id extraido do PROPRIO cookie/token (nunca de query
@@ -180,7 +214,7 @@ def root(request: Request) -> RedirectResponse:
     owner_id: str | None = None
     if token:
         try:
-            owner_id = auth.verify_session(token, secret=_settings.session_secret)
+            owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
             owner_id = None
     target = f"/devs/{urllib.parse.quote(owner_id, safe='')}/lobby" if owner_id else "/login"
@@ -265,9 +299,14 @@ def callback(
     redirect = RedirectResponse(
         f"/devs/{urllib.parse.quote(owner_id, safe='')}/lobby", status_code=302
     )
+    with store.connect(_settings.db_path) as conn:
+        current_gen = store.get_session_generation(conn, owner_id)
     try:
         session_token = auth.sign_session(
-            owner_id, secret=_settings.session_secret, ttl_seconds=_settings.auth_token_ttl_seconds
+            owner_id,
+            secret=_settings.session_secret,
+            ttl_seconds=_settings.auth_token_ttl_seconds,
+            gen=current_gen,
         )
     except auth.AuthTokenError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
@@ -437,7 +476,7 @@ def logout(request: Request) -> RedirectResponse:
     token = _extract_token(request)
     if token:
         try:
-            owner_id = auth.verify_session(token, secret=_settings.session_secret)
+            owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
             owner_id = None
         if owner_id:
@@ -446,6 +485,25 @@ def logout(request: Request) -> RedirectResponse:
             except (ValueError, k8s_manager.TeardownError):
                 logger.warning(
                     "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
+                )
+            # Incrementa a geracao DEPOIS de _close_dev_session -- essa
+            # funcao decide "owner_id nunca provisionado" checando se ja
+            # existe linha no SQLite (ValueError se nao existir); bumpar
+            # a geracao ANTES criaria uma linha minima (mesmo padrao de
+            # set_login_choice) e faria esse owner parecer "provisionado"
+            # por engano, com namespace/slug vazios. E o que da revogacao
+            # de verdade pro proprio krewhub_session (issue #2): melhor
+            # esforco igual ao resto de /logout, uma falha aqui (SQLite
+            # indisponivel) nao pode impedir o logout do KrewHub em si
+            # (limpar cookie + redirect).
+            try:
+                with store.connect(_settings.db_path) as conn:
+                    store.bump_session_generation(conn, owner_id)
+            except sqlite3.Error:
+                logger.warning(
+                    "falha ao incrementar session_generation no /logout pra owner_id=%s",
+                    owner_id,
+                    exc_info=True,
                 )
 
     redirect = RedirectResponse("/login", status_code=302)

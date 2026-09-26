@@ -160,10 +160,6 @@ intact, so a subsequent provision picks up where it left off); `GET
 
 - **No automatic idle culling** — pods stay up until someone calls
   `/close`/`/logout` manually, or an operator tears them down by hand.
-- **KrewHub's own session is a stateless HMAC token** — `/logout`
-  clears the browser cookie, but there's no server-side revocation of
-  that specific token (unlike the `kirocrew` session itself, which has
-  real revocation).
 - **The Helm chart isn't yet validated as the sole deployment
   mechanism** in production across every environment — it works
   (`helm lint`/`helm template` without errors), but depends on correct

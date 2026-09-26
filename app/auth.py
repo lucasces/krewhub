@@ -48,16 +48,20 @@ def _b64d(data: str) -> bytes:
     return base64.urlsafe_b64decode(padded)
 
 
-def sign_session(owner_id: str, *, secret: str, ttl_seconds: int) -> str:
+def sign_session(owner_id: str, *, secret: str, ttl_seconds: int, gen: int = 0) -> str:
     """Emite um token `<payload_b64>.<assinatura_b64>` -- payload =
-    {"owner_id", "exp"} (epoch, segundos). Levanta AuthTokenError (nao
-    finge sucesso) se KREWHUB_SESSION_SECRET nao estiver configurada."""
+    {"owner_id", "exp", "gen"} (epoch, segundos; gen = geracao de
+    sessao atual do owner_id, ver app/store.py::get_session_generation).
+    `gen` default 0 cobre tanto "owner_id sem linha em devs ainda"
+    quanto os testes/chamadores que nao precisam de revogacao (ver
+    tests/test_auth_tokens.py). Levanta AuthTokenError (nao finge
+    sucesso) se KREWHUB_SESSION_SECRET nao estiver configurada."""
     if not secret:
         raise AuthTokenError(
             "KREWHUB_SESSION_SECRET nao configurada -- nao da pra assinar sessao"
         )
     payload = json.dumps(
-        {"owner_id": owner_id, "exp": int(time.time()) + ttl_seconds},
+        {"owner_id": owner_id, "exp": int(time.time()) + ttl_seconds, "gen": gen},
         separators=(",", ":"),
     ).encode("utf-8")
     payload_b64 = _b64e(payload)
@@ -66,10 +70,25 @@ def sign_session(owner_id: str, *, secret: str, ttl_seconds: int) -> str:
 
 
 def verify_session(token: str, *, secret: str) -> str:
-    """Valida assinatura + expiracao, devolve owner_id. Levanta
-    AuthTokenError pra QUALQUER problema (malformado, assinatura errada,
-    expirado, secret ausente) -- caller decide o status HTTP (401/403),
-    esta funcao nunca devolve um owner_id nao confiavel."""
+    """Valida assinatura + expiracao, devolve owner_id. Wrapper fino
+    sobre `verify_session_payload` -- mantido pra nao mudar o contrato
+    ja testado (tests/test_auth_tokens.py) nem exigir SQLite pra testar
+    auth.py isoladamente; NAO faz a checagem de geracao (ver
+    `verify_session_payload` e `app/main.py::_verify_session_checked`
+    pra isso)."""
+    return verify_session_payload(token, secret=secret)["owner_id"]
+
+
+def verify_session_payload(token: str, *, secret: str) -> dict:
+    """Mesma validacao de `verify_session` (assinatura + expiracao),
+    mas devolve o payload inteiro ({"owner_id", "exp", "gen"}) em vez
+    de so owner_id -- usado por `app/main.py::_verify_session_checked`
+    pra comparar "gen" contra `store.get_session_generation`. Levanta
+    AuthTokenError pra QUALQUER problema (malformado, assinatura
+    errada, expirado, secret ausente) -- caller decide o status HTTP
+    (401/403), esta funcao nunca devolve um payload nao confiavel.
+    `gen` ausente (token de formato antigo, pre-migracao) vira 0, mesmo
+    default da coluna `session_generation`."""
     if not secret:
         raise AuthTokenError(
             "KREWHUB_SESSION_SECRET nao configurada -- nao da pra validar sessao"
@@ -98,4 +117,7 @@ def verify_session(token: str, *, secret: str) -> str:
         raise AuthTokenError("payload sem 'owner_id'/'exp'")
     if time.time() > exp:
         raise AuthTokenError("token expirado")
-    return owner_id
+    gen = payload.get("gen", 0)
+    if not isinstance(gen, int):
+        raise AuthTokenError("payload com 'gen' invalido")
+    return {"owner_id": owner_id, "exp": exp, "gen": gen}

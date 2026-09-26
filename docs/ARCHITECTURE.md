@@ -39,15 +39,24 @@ HTTP internally) **or** an equivalent `Authorization: Bearer <token>`
 header, for programmatic calls that don't rely on a browser cookie.
 
 The token is signed locally (`app/auth.py`, HMAC-SHA256 over
-`{owner_id, exp}`), not the IdP's `access_token` — a deliberate
+`{owner_id, exp, gen}`), not the IdP's `access_token` — a deliberate
 decision: validating the IdP's `access_token` via JWKS would also
 work, but a dedicated token avoids depending on network access to the
 IdP on every protected request, and avoids spreading a token that
 carries IdP scope/permissions (not just identity) further than
-necessary. Consequence: since it's stateless HMAC, there's no
-server-side revocation of that token — `/logout` clears the browser
-cookie, but deliberately resending an old token still authenticates
-until its natural `exp`.
+necessary.
+
+Revocation: each `owner_id` has a `session_generation` counter
+persisted in the same SQLite store used for the rest of the dev's
+state (`app/store.py`). Every signed token embeds the generation that
+was current at issuance time; verifying a token compares that embedded
+value against the store's current one for the same `owner_id`, in
+addition to the HMAC signature and expiry. `GET /logout` increments
+the counter for the resolved `owner_id`, which immediately invalidates
+every token issued before that point — including ones already held by
+other tabs/devices — without needing a call to the IdP. `GET /close`
+does not touch this counter (the dev stays logged into KrewHub, only
+the workload and the `kirocrew` dashboard session end).
 
 A valid credential for an `owner_id` different from the one in the URL
 → explicit `403` (this is what stops one dev from calling
