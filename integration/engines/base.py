@@ -1,15 +1,15 @@
 """Interface comum de "engine" de cluster Kubernetes efêmero pro
-smoke-test.
+integration test.
 
 Por que essa abstração existe: kind e k3d bateram em paredes estruturais
 neste host (NixOS, sem `/lib/modules` clássico, cgroups/kernel não
 expondo o que o driver docker-in-docker de kind/k3d espera -- ver
-`SmokeReport` pra evidência exata de cada tentativa). Em vez de
+`IntegrationReport` pra evidência exata de cada tentativa). Em vez de
 hardcodar "o jeito que funcionou aqui" (podman machine) no script de
-smoke-test, o script principal (`run_smoke.py`) só fala com esta
+integration test, o script principal (`run_integration.py`) só fala com esta
 interface -- trocar de engine no futuro (voltar pra kind/k3d se o host
 mudar, apontar pra um cluster gerenciado, etc.) não deve exigir tocar em
-`run_smoke.py` nem no fake-kirocrew.
+`run_integration.py` nem no fake-kirocrew.
 
 Contrato mínimo, deliberadamente pequeno (3 métodos):
   - `is_available()` -- checagem de pré-requisito, RÁPIDA e sem efeito
@@ -40,7 +40,7 @@ class EngineAvailability:
 
 @dataclass(frozen=True)
 class ClusterHandle:
-    """Tudo que o smoke-test precisa pra falar com o cluster efêmero,
+    """Tudo que o integration test precisa pra falar com o cluster efêmero,
     sem saber qual engine o criou.
 
     kubeconfig_path: path pra um kubeconfig usável IMEDIATAMENTE por
@@ -52,8 +52,8 @@ class ClusterHandle:
     context: nome do contexto dentro desse kubeconfig a usar.
     node_ip: IP (do ponto de vista do HOST) alcançável pra bater em
         NodePort/porta exposta do cluster -- usado pro passo final do
-        smoke-test (curl real através do CHP, não só chamada da API k8s).
-        Pode ser `None` se o engine preferir que o smoke-test use
+        integration test (curl real através do CHP, não só chamada da API k8s).
+        Pode ser `None` se o engine preferir que o integration test use
         `kubectl port-forward` em vez de NodePort (também válido -- é o
         mesmo padrão já usado contra o cluster real de produção).
     """
@@ -64,10 +64,21 @@ class ClusterHandle:
 
 
 class ClusterEngine(abc.ABC):
-    """Implementações concretas vivem em `smoke/engines/<nome>.py` e se
-    registram em `smoke/engines/__init__.py::ENGINES`."""
+    """Implementações concretas vivem em `integration/engines/<nome>.py` e se
+    registram em `integration/engines/__init__.py::ENGINES`."""
 
     name: str
+
+    # StorageClass que o cluster efêmero desta engine já traz por padrão,
+    # usada por `run_integration.py` como `KREWHUB_STORAGE_CLASS` -- NÃO é
+    # universal entre engines (k3s, usado por `podman-machine`, chama a
+    # dele "local-path"; `kind` bundla o local-path-provisioner mas chama
+    # a StorageClass resultante de "standard" -- ver `kind.py`). Setar
+    # errado aqui prende o PVC em Pending pra sempre (nenhum provisioner
+    # reclama a claim), o Pod nunca fica Ready, e `wait_for_ready()`
+    # estoura o timeout sem nenhum erro explícito -- daí isso ser um
+    # atributo por engine, não uma constante única no script principal.
+    default_storage_class: str = "local-path"
 
     @abc.abstractmethod
     def is_available(self) -> EngineAvailability:

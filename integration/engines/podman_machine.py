@@ -1,6 +1,6 @@
 """Engine `podman-machine` -- o único engine funcional neste host hoje
 (default de fato quando nenhum outro é explicitamente pedido e disponível
--- mas nunca escolhido silenciosamente, ver `run_smoke.py`).
+-- mas nunca escolhido silenciosamente, ver `run_integration.py`).
 
 Por que este e não kind/k3d: kind e k3d rodam "nodes" Kubernetes DENTRO
 de containers do runtime local (Docker/Podman), e batem em duas paredes
@@ -12,7 +12,7 @@ dentro -- as duas paredes simplesmente não existem nesse contexto. Dentro
 dessa VM instalamos k3s NATIVAMENTE (não em mais um container aninhado)
 via o instalador oficial (`get.k3s.io`) -- um único binário que já traz
 containerd embutido e o controlador de NetworkPolicy do kube-router
-habilitado por padrão (crítico pro smoke-test de isolamento entre pods de
+habilitado por padrão (crítico pro integration test de isolamento entre pods de
 dev, que é o teste mais importante desta camada).
 
 Pré-requisito descoberto ao vivo (não documentado antes): a imagem padrão
@@ -38,11 +38,11 @@ Fluxo de `up()`:
   5. devolve um `ClusterHandle` usável imediatamente por
      `kubectl`/client Python `kubernetes` rodando no HOST -- inclusive
      `exec` (usado por `chp_client.py`/`session_client.py`) e
-     `port-forward` (usado pro passo final do smoke-test, mesmo padrão
+     `port-forward` (usado pro passo final do integration test, mesmo padrão
      já usado contra o cluster de produção), ambos confirmados ao vivo.
 
 `down()` por padrão remove a VM inteira (`podman machine rm -f`) --
-"efêmero" de verdade. Setar `KREWHUB_SMOKE_KEEP_MACHINE=1` pula a
+"efêmero" de verdade. Setar `KREWHUB_INTEGRATION_KEEP_MACHINE=1` pula a
 remoção (só para/mata o túnel) pra iteração rápida repetida sem pagar de
 novo o custo de download de imagem + instalação do k3s (~2-3min)."""
 
@@ -56,12 +56,12 @@ import time
 
 from .base import ClusterEngine, ClusterHandle, EngineAvailability, EngineError
 
-_MACHINE_NAME = os.environ.get("KREWHUB_SMOKE_PODMAN_MACHINE_NAME", "krewhub-smoke")
-_LOCAL_API_PORT = int(os.environ.get("KREWHUB_SMOKE_LOCAL_API_PORT", "16443"))
+_MACHINE_NAME = os.environ.get("KREWHUB_INTEGRATION_PODMAN_MACHINE_NAME", "krewhub-integration")
+_LOCAL_API_PORT = int(os.environ.get("KREWHUB_INTEGRATION_LOCAL_API_PORT", "16443"))
 _KUBECONFIG_PATH = os.environ.get(
-    "KREWHUB_SMOKE_KUBECONFIG_PATH", "/tmp/krewhub-smoke-kubeconfig.yaml"
+    "KREWHUB_INTEGRATION_KUBECONFIG_PATH", "/tmp/krewhub-integration-kubeconfig.yaml"
 )
-_CONTEXT_NAME = "krewhub-smoke"
+_CONTEXT_NAME = "krewhub-integration"
 _CONTAINERS_CONF = os.path.expanduser("~/.config/containers/containers.conf")
 
 _HELPER_PACKAGES = ["qemu", "gvproxy", "virtiofsd"]
@@ -167,7 +167,7 @@ class PodmanMachineEngine(ClusterEngine):
                 ok=False,
                 reason="/dev/kvm não existe -- sem aceleração de virtualização, "
                 "'podman machine' (QEMU) não é viável (rodaria em emulação pura, "
-                "inviável pra um smoke-test)",
+                "inviável pra um integration test)",
             )
         if not os.access("/dev/kvm", os.R_OK | os.W_OK):
             return EngineAvailability(ok=False, reason="/dev/kvm existe mas sem permissão de leitura/escrita pro usuário atual")
@@ -302,7 +302,7 @@ class PodmanMachineEngine(ClusterEngine):
         manifest com `imagePullPolicy: IfNotPresent` (default quando a
         tag não é `latest`) -- sem isso o k3s tentaria puxar de um
         registry real e falharia (a imagem só existe local)."""
-        remote_dir = f"/tmp/krewhub-smoke-image-{tag}"
+        remote_dir = f"/tmp/krewhub-integration-image-{tag}"
         _ssh(f"rm -rf {remote_dir} && mkdir -p {remote_dir}")
         identity, ssh_port = _identity_and_port()
         tar_proc = subprocess.run(
@@ -346,7 +346,7 @@ class PodmanMachineEngine(ClusterEngine):
                 pass
             self._tunnel_proc = None
 
-        if os.environ.get("KREWHUB_SMOKE_KEEP_MACHINE") == "1":
+        if os.environ.get("KREWHUB_INTEGRATION_KEEP_MACHINE") == "1":
             _run(["podman", "machine", "stop", _MACHINE_NAME], check=False, timeout=120)
             return
 

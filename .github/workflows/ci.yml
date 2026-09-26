@@ -1,0 +1,71 @@
+name: CI
+
+# Runs the test suite and the Helm chart sanity checks. Never publishes
+# anything (no image/chart push) -- publishing only happens from
+# release.yml, which runs automatically on pushing a version tag (no manual
+# approval gate).
+#
+# Also exposed as a reusable workflow (`workflow_call`) so release.yml
+# can require the same checks to pass before publishing, without
+# duplicating the steps -- see AGENTS.md/RELEASING.md for the release
+# flow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    name: Test (uv run pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Run test suite
+        run: uv run pytest
+
+  helm:
+    name: Helm lint + template sanity check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+
+      - name: helm lint
+        run: helm lint charts/krewhub
+
+      - name: helm template (fictitious generic values)
+        run: |
+          # Throwaway values file, fictitious on purpose (no real cluster
+          # domain/StorageClass/secret name) -- only exists to satisfy the
+          # chart's `required()` fields (chp.adminToken.existingSecretName)
+          # so `helm template` renders end to end. Not related to
+          # charts/krewhub/examples/values-family-cluster.yaml, which is
+          # real-cluster-specific and gitignored/untracked -- never
+          # available to CI and never referenced here.
+          cat > /tmp/ci-fictitious-values.yaml <<'YAML'
+          devNamespace:
+            create: true
+            name: example-devs
+
+          krewhubCentral:
+            image:
+              repository: ghcr.io/example-org/krewhub-central
+              tag: "example-tag"
+            persistence:
+              storageClassName: standard
+            oidc:
+              existingSecretName: example-oidc
+            selfHost: krewhub.example.test
+
+          chp:
+            adminToken:
+              existingSecretName: example-chp-admin-token
+          YAML
+
+          helm template ci-sanity-check charts/krewhub \
+            -f /tmp/ci-fictitious-values.yaml

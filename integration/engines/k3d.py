@@ -46,7 +46,7 @@ class K3dEngine(ClusterEngine):
     def up(self) -> ClusterHandle:
         raise EngineError(
             "engine 'k3d' não suportado neste host -- rode is_available() "
-            "e veja o motivo, ou escolha outro KREWHUB_SMOKE_K8S_ENGINE"
+            "e veja o motivo, ou escolha outro KREWHUB_INTEGRATION_K8S_ENGINE"
         )
 
     def down(self) -> None:

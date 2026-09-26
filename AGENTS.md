@@ -91,15 +91,20 @@ generic/empty).
   `ENOSPC` instead — that's a node sysctl, not the chart/app (a
   third-party environment works around this with a dedicated nodepool
   with the sysctl fixed).
-- `kind`/`k3d` don't work for an ephemeral test cluster on this kind of
-  NixOS setup: they mount the host's `/lib/modules` at a path that
-  doesn't exist in this layout, and expect the Podman socket at a fixed
-  path different from the rootless one
+- `kind`/`k3d` don't work for an ephemeral test cluster on **this
+  NixOS host specifically**: they mount the host's `/lib/modules` at a
+  path that doesn't exist in this layout, and expect the Podman socket
+  at a fixed path different from the rootless one
   (`$XDG_RUNTIME_DIR/podman/podman.sock`). `podman machine` (an
-  ephemeral QEMU/KVM VM, k3s built in) works —
-  `smoke/engines/podman_machine.py` handles the
+  ephemeral QEMU/KVM VM, k3s built in) works locally here —
+  `integration/engines/podman_machine.py` handles the
   `gvproxy`/`qemu-img`/`virtiofsd` prerequisite that the Nix image
-  doesn't bundle.
+  doesn't bundle. This is a local-host limitation, not a `kind`
+  limitation in general: on GitHub-hosted `ubuntu-latest` runners
+  (real, non-rootless Docker preinstalled, classic `/lib/modules`
+  present), `kind` works cleanly with no workaround needed —
+  `release.yml`'s `integration-test` job uses the `kind` engine
+  (`integration/engines/kind.py`) precisely because that's true there.
 - Multi-arch (amd64+arm64) image builds with `podman`: the `podman
   machine` connection needs to be rootful (`--connection
   <name>-root`) — rootless doesn't propagate binfmt to the build. The

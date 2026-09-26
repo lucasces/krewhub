@@ -1,0 +1,180 @@
+name: Release
+
+# Triggered by pushing a tag matching v* (e.g. v1.2.3 for a stable
+# release, v1.2.3-rc.1 for a release candidate). Publishes BOTH the
+# multi-arch container image and the Helm chart. Pushing the tag is
+# itself the deliberate release action -- publishing happens
+# automatically, no manual approval gate. See RELEASING.md for the
+# human-facing process (cutting a tag, promoting an RC to stable).
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # Reuses ci.yml (test + helm lint/template) as a required check before
+  # anything gets published -- see ci.yml's `workflow_call` trigger.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  determine-version:
+    name: Determine release version
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    steps:
+      - name: Derive version + RC/stable from the tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          # Clean MAJOR.MINOR.PATCH (no pre-release/build suffix) =>
+          # stable. Anything else (e.g. "-rc.1", "-beta.2", "+build")
+          # => release candidate. Per semver, a pre-release suffix is
+          # introduced by "-"; this also naturally covers a literal
+          # "-rc." tag as called out in the task. Informational only
+          # (logged below) -- docker/metadata-action derives its own
+          # `latest` tagging decision independently from the same tag.
+          if [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            IS_PRERELEASE=false
+          else
+            IS_PRERELEASE=true
+          fi
+
+          echo "Tag: ${TAG} -> version=${VERSION} is_prerelease=${IS_PRERELEASE}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+  # --- Integration test (ephemeral kind cluster) ------------------------
+  # Real gate before publishing anything: builds the fake-kirocrew stand-in
+  # image and loads it into a throwaway `kind` cluster created on the
+  # runner itself, then runs the full provision -> CHP route -> dashboard
+  # access -> close -> logout -> cleanup cycle from
+  # `integration/run_integration.py` against it, exercising the exact code
+  # at this tag (krewhub-central runs as a local process against the
+  # ephemeral cluster's kubeconfig -- by design, see
+  # `integration/manifests.yaml`, not as a pod/image itself; only the
+  # per-dev workload stand-in, fake-kirocrew, needs to be an in-cluster
+  # image). `kind` only works here because `ubuntu-latest` has real
+  # (non-rootless) Docker and a classic `/lib/modules` -- neither holds on
+  # the maintainer's NixOS dev host, see `AGENTS.md` and
+  # `integration/engines/kind.py`.
+  integration-test:
+    name: Integration test (kind, ephemeral cluster)
+    needs: determine-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Bootstrap .venv (needed by the krewhub-central process the suite spawns)
+        run: uv sync
+
+      - name: Install kind + kubectl (install only -- integration/engines/kind.py owns cluster lifecycle)
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Run integration test suite (kind engine)
+        env:
+          KREWHUB_INTEGRATION_K8S_ENGINE: kind
+        run: python3 integration/run_integration.py
+
+  # --- Image publishing ------------------------------------------------
+  # A single job handles both RC and stable tags -- docker/metadata-action's
+  # own semver/prerelease logic (see the `tags:` step below) already
+  # tags `latest` only for a clean stable release, so no rc/stable job
+  # split is needed here now that there's no per-tier environment gate.
+
+  publish-image:
+    name: Publish image
+    needs: [determine-version, integration-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/krewhub-central
+          # type=semver + the default `latest=auto` flavor tags `latest`
+          # only for a clean MAJOR.MINOR.PATCH tag, never for a
+          # pre-release (e.g. `-rc.1`) tag -- verified against
+          # docker/metadata-action's own documented behavior.
+          tags: |
+            type=semver,pattern={{version}}
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # --- Chart publishing -------------------------------------------------
+
+  publish-chart:
+    name: Publish chart
+    needs: [determine-version, integration-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/setup-helm@v5
+
+      - name: Package chart
+        run: |
+          mkdir -p dist
+          helm package charts/krewhub \
+            --version "${{ needs.determine-version.outputs.version }}" \
+            --app-version "${{ needs.determine-version.outputs.version }}" \
+            --destination dist
+
+      - name: Verify the package doesn't leak examples/ or non-generic values
+        run: |
+          PKG="$(ls dist/*.tgz)"
+          echo "Inspecting ${PKG}"
+          tar -tzf "${PKG}"
+          if tar -tzf "${PKG}" | grep -E '(^|/)examples/'; then
+            echo "::error::Packaged chart contains examples/ -- .helmignore should exclude it, see charts/krewhub/.helmignore"
+            exit 1
+          fi
+          if tar -tzf "${PKG}" | grep -E '(^|/)values-'; then
+            echo "::error::Packaged chart contains a values-*.yaml override file, this must never ship in the published artifact"
+            exit 1
+          fi
+
+      - name: Log in to GHCR (Helm OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" --password-stdin
+
+      - name: Push chart
+        run: |
+          PKG="$(ls dist/*.tgz)"
+          helm push "${PKG}" "oci://ghcr.io/${{ github.repository_owner }}/charts"

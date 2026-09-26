@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Servidor HTTP mínimo (só stdlib) que imita o suficiente do dashboard
-real do kirocrew (`ghcr.io/kirodotdev/kirocrew`) pro smoke-test do
+real do kirocrew (`ghcr.io/kirodotdev/kirocrew`) pro integration test do
 KrewHub: probes de health e uma página `/` reconhecível. NÃO reimplementa
 autenticação/sandbox/CLI reais -- só o suficiente pra provar que o
 reconcile do KrewHub e o roteamento do CHP funcionam de ponta a ponta

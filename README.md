@@ -180,9 +180,9 @@ intact, so a subsequent provision picks up where it left off); `GET
 
 ## Contributing
 
-This project doesn't have a public repository yet — once it does, this
-section will have the link for opening issues/PRs. For now, changes
-are made directly by the maintainer.
+Changes are made directly by the maintainer; there's no external
+contributor process yet. See [`RELEASING.md`](RELEASING.md) for how a
+tagged release (image + Helm chart) gets published via GitHub Actions.
 
 ## License
 

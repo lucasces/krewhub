@@ -1,14 +1,14 @@
-# Manifests mínimos pro smoke-test em cluster efêmero: os dois
+# Manifests mínimos pro integration test em cluster efêmero: os dois
 # namespaces + o CHP (mesma imagem/flags do manifest real do CHP no
 # repo GitOps do homelab) -- NÃO é o mesmo arquivo (evita acoplar o
-# smoke-test ao layout do repo GitOps), mas é conceitualmente idêntico. `krewhub-central` NÃO é deployado aqui como
+# integration test ao layout do repo GitOps), mas é conceitualmente idêntico. `krewhub-central` NÃO é deployado aqui como
 # pod -- roda como processo local (fora do cluster, `uvicorn`/`uv run`
 # direto, ver AGENTS.md), apontando pro kubeconfig do cluster
 # efêmero; mais rápido de iterar e exercita exatamente o mesmo código.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: krewhub-smoke
+  name: krewhub-integration
 ---
 apiVersion: v1
 kind: Namespace
@@ -21,16 +21,16 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: chp-admin-token
-  namespace: krewhub-smoke
+  namespace: krewhub-integration
 type: Opaque
 stringData:
-  token: "smoke-test-only-placeholder-token"
+  token: "integration-test-only-placeholder-token"
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: configurable-http-proxy
-  namespace: krewhub-smoke
+  namespace: krewhub-integration
   labels:
     app: configurable-http-proxy
 spec:
@@ -108,7 +108,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: configurable-http-proxy
-  namespace: krewhub-smoke
+  namespace: krewhub-integration
 spec:
   type: ClusterIP
   selector:

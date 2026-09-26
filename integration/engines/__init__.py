@@ -1,7 +1,7 @@
-"""Registro dos engines de cluster efêmero disponíveis pro smoke-test.
+"""Registro dos engines de cluster efêmero disponíveis pro integration test.
 
-Seleção via env var `KREWHUB_SMOKE_K8S_ENGINE` -- SEM default silencioso
-(ver `run_smoke.py::select_engine`): se a env var não vier setada, o
+Seleção via env var `KREWHUB_INTEGRATION_K8S_ENGINE` -- SEM default silencioso
+(ver `run_integration.py::select_engine`): se a env var não vier setada, o
 script lista as opções conhecidas (com `is_available()` de cada uma) e
 para, pedindo pra escolher explicitamente. Isso é deliberado -- rodar o
 engine errado sem perceber (ex.: achar que testou contra kind mas caiu no

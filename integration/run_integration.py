@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test do KrewHub central contra um cluster Kubernetes EFÊMERO
+"""Integration test do KrewHub central contra um cluster Kubernetes EFÊMERO
 (descartável) -- diferente das outras duas camadas de teste já existentes:
 
   1. `uv run pytest` (offline, ~1.4s) -- tudo mockado, nenhum cluster.
@@ -10,16 +10,16 @@
 Esta camada prova o mesmo fluxo ponta a ponta (provision -> rota no CHP
 -> acesso ao dashboard -> close -> logout -> cleanup) SEM tocar no
 cluster real e SEM depender da imagem pesada/licenciada do kirocrew
-real -- usa `smoke/fake_kirocrew/` no lugar dela (ver módulo).
+real -- usa `integration/fake_kirocrew/` no lugar dela (ver módulo).
 
-Engine de cluster efêmero é PLUGÁVEL (ver `smoke/engines/`) -- selecionado
-via `KREWHUB_SMOKE_K8S_ENGINE`, SEM default silencioso: rodar sem essa env
+Engine de cluster efêmero é PLUGÁVEL (ver `integration/engines/`) -- selecionado
+via `KREWHUB_INTEGRATION_K8S_ENGINE`, SEM default silencioso: rodar sem essa env
 var setada lista as opções conhecidas (com `is_available()` de cada uma)
 e sai, pedindo pra escolher. Isso é deliberado -- ver `engines/base.py`.
 
 Uso:
-    KREWHUB_SMOKE_K8S_ENGINE=podman-machine python3 smoke/run_smoke.py
-    python3 smoke/run_smoke.py --list-engines
+    KREWHUB_INTEGRATION_K8S_ENGINE=podman-machine python3 integration/run_integration.py
+    python3 integration/run_integration.py --list-engines
 """
 
 from __future__ import annotations
@@ -40,32 +40,33 @@ from engines import ENGINES, EngineError  # noqa: E402
 
 MANIFESTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manifests.yaml")
 FAKE_KIROCREW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_kirocrew")
+CENTRAL_LOG_PATH = "/tmp/krewhub-integration-central.log"
 
-OWNER_ID = "smoke-test@krewhub.local.test"
+OWNER_ID = "integration-test@krewhub.local.test"
 KREWHUB_PORT = 9200  # processo local do krewhub-central (não confundir com a porta pública via CHP)
 CHP_LOCAL_PORT = 18080  # kubectl port-forward local pro Service do CHP
-SESSION_SECRET = "smoke-test-only-session-secret"
+SESSION_SECRET = "integration-test-only-session-secret"
 
 
-class SmokeFailure(RuntimeError):
+class IntegrationFailure(RuntimeError):
     pass
 
 
 def _print_engine_menu() -> None:
-    print("KREWHUB_SMOKE_K8S_ENGINE não setado -- escolha um explicitamente. "
+    print("KREWHUB_INTEGRATION_K8S_ENGINE não setado -- escolha um explicitamente. "
           "Opções conhecidas:\n")
     for name, cls in ENGINES.items():
         availability = cls().is_available()
         mark = "OK" if availability.ok else "indisponível"
         print(f"  {name:16s} [{mark}] {availability.reason}")
-    print("\nExemplo: KREWHUB_SMOKE_K8S_ENGINE=podman-machine python3 smoke/run_smoke.py")
+    print("\nExemplo: KREWHUB_INTEGRATION_K8S_ENGINE=podman-machine python3 integration/run_integration.py")
 
 
 def _kubectl(handle, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     cmd = ["kubectl", "--kubeconfig", handle.kubeconfig_path, "--context", handle.context, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
-        raise SmokeFailure(f"kubectl falhou ({' '.join(args)}): {result.stderr}")
+        raise IntegrationFailure(f"kubectl falhou ({' '.join(args)}): {result.stderr}")
     return result
 
 
@@ -81,7 +82,7 @@ def _wait_http(url: str, *, timeout_s: int = 60, headers: dict | None = None) ->
         except Exception as exc:  # noqa: BLE001
             last_err = exc
         time.sleep(2)
-    raise SmokeFailure(f"timeout esperando {url} responder: {last_err}")
+    raise IntegrationFailure(f"timeout esperando {url} responder: {last_err}")
 
 
 def _http(method: str, url: str, *, headers: dict | None = None, timeout: int = 30) -> tuple[int, bytes]:
@@ -93,12 +94,30 @@ def _http(method: str, url: str, *, headers: dict | None = None, timeout: int = 
         return exc.code, exc.read()
 
 
+def _dump_central_log(*, tail_lines: int = 200) -> None:
+    """Mostra as últimas linhas do log do processo local do
+    krewhub-central no stdout deste script -- sem isso, uma falha em CI
+    (ex.: /provision nunca fica Ready) não dá NENHUMA visibilidade sobre
+    o que o krewhub-central viu/fez (erro de reconcile, erro da API k8s,
+    etc.), só "o cliente desistiu de esperar". Melhor esforço: nunca
+    levanta (arquivo pode não existir se o processo nem chegou a subir)."""
+    print(f"\n---- tail -n {tail_lines} {CENTRAL_LOG_PATH} ----")
+    try:
+        with open(CENTRAL_LOG_PATH) as f:
+            lines = f.readlines()
+        for line in lines[-tail_lines:]:
+            print(line, end="")
+    except OSError as exc:
+        print(f"(não foi possível ler {CENTRAL_LOG_PATH}: {exc})")
+    print("---- fim do log do krewhub-central ----\n")
+
+
 def main() -> int:
     if "--list-engines" in sys.argv:
         _print_engine_menu()
         return 0
 
-    engine_name = os.environ.get("KREWHUB_SMOKE_K8S_ENGINE")
+    engine_name = os.environ.get("KREWHUB_INTEGRATION_K8S_ENGINE")
     if not engine_name:
         _print_engine_menu()
         return 2
@@ -125,12 +144,12 @@ def main() -> int:
 
         print("[2/8] aplicando manifests.yaml (namespaces + CHP) ...")
         _kubectl(handle, "apply", "-f", MANIFESTS_PATH)
-        _kubectl(handle, "-n", "krewhub-smoke", "wait", "--for=condition=available",
+        _kubectl(handle, "-n", "krewhub-integration", "wait", "--for=condition=available",
                  "deployment/configurable-http-proxy", "--timeout=120s")
         steps_ok.append("chp_ready")
 
         print("[3/8] load_image(fake-kirocrew) ...")
-        image_ref = engine.load_image(FAKE_KIROCREW_DIR, "fake-kirocrew:smoke")
+        image_ref = engine.load_image(FAKE_KIROCREW_DIR, "fake-kirocrew:integration")
         print(f"      imagem disponível no cluster efêmero como {image_ref}")
         steps_ok.append("fake_image_loaded")
 
@@ -140,14 +159,14 @@ def main() -> int:
             KREWHUB_KUBECONFIG=handle.kubeconfig_path,
             KREWHUB_K8S_CONTEXT=handle.context,
             KREWHUB_DEV_NAMESPACE="krewhub-devs",
-            KREWHUB_BASE_DOMAIN="smoke.internal",
+            KREWHUB_BASE_DOMAIN="integration.internal",
             KREWHUB_PUBLIC_PORT=str(CHP_LOCAL_PORT),
             KREWHUB_KIROCREW_IMAGE=image_ref,
-            KREWHUB_STORAGE_CLASS="local-path",
+            KREWHUB_STORAGE_CLASS=engine.default_storage_class,
             KREWHUB_STORAGE_SIZE="256Mi",
-            KREWHUB_CHP_NAMESPACE="krewhub-smoke",
+            KREWHUB_CHP_NAMESPACE="krewhub-integration",
             KREWHUB_CHP_ADMIN_PORT="8001",
-            KREWHUB_DB_PATH="/tmp/krewhub-smoke.db",
+            KREWHUB_DB_PATH="/tmp/krewhub-integration.db",
             KREWHUB_SESSION_TTL="1h",
             KREWHUB_SESSION_SECRET=SESSION_SECRET,
             KREWHUB_AUTH_TOKEN_TTL_SECONDS="3600",
@@ -158,12 +177,12 @@ def main() -> int:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         python_bin = os.path.join(repo_root, ".venv", "bin", "python")
         if not os.path.isfile(python_bin):
-            raise SmokeFailure(f"{python_bin} não existe -- rode `uv sync` (ou `uv run pytest`) uma vez pra bootstrapar o .venv")
+            raise IntegrationFailure(f"{python_bin} não existe -- rode `uv sync` (ou `uv run pytest`) uma vez pra bootstrapar o .venv")
         krewhub_proc = subprocess.Popen(
             [python_bin, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(KREWHUB_PORT)],
             cwd=repo_root,
             env=env,
-            stdout=open("/tmp/krewhub-smoke-central.log", "w"),
+            stdout=open(CENTRAL_LOG_PATH, "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -182,15 +201,15 @@ def main() -> int:
             "POST",
             f"http://127.0.0.1:{KREWHUB_PORT}/devs/{urllib.parse.quote(OWNER_ID, safe='')}/provision?wait=true",
             headers={"Authorization": f"Bearer {bearer}"},
-            timeout=180,
+            timeout=260,  # > server's wait_for_ready timeout (240s, app/k8s_manager.py)
         )
         if status != 200:
-            raise SmokeFailure(f"/provision -> {status}: {body!r}")
+            raise IntegrationFailure(f"/provision -> {status}: {body!r}")
         provision_result = json.loads(body)
         print(f"      provision ok: steps={provision_result.get('steps')} route={provision_result.get('route')}")
         dashboard_url = provision_result.get("dashboard_url_with_token")
         if not dashboard_url:
-            raise SmokeFailure("provision não retornou dashboard_url_with_token")
+            raise IntegrationFailure("provision não retornou dashboard_url_with_token")
         steps_ok.append("provision")
 
         print("[6/8] port-forward pro Service do CHP + acesso real ao dashboard fake ...")
@@ -202,7 +221,7 @@ def main() -> int:
                 "--context",
                 handle.context,
                 "-n",
-                "krewhub-smoke",
+                "krewhub-integration",
                 "port-forward",
                 "svc/configurable-http-proxy",
                 f"{CHP_LOCAL_PORT}:8000",
@@ -220,7 +239,7 @@ def main() -> int:
             headers={"Host": host_header},
         )
         if status != 200 or b"fake-kirocrew dashboard" not in body:
-            raise SmokeFailure(f"acesso ao dashboard fake via CHP falhou: status={status} body={body[:300]!r}")
+            raise IntegrationFailure(f"acesso ao dashboard fake via CHP falhou: status={status} body={body[:300]!r}")
         print("      200 OK através do CHP, HTML do fake-kirocrew confirmado")
         steps_ok.append("dashboard_via_chp")
 
@@ -231,7 +250,7 @@ def main() -> int:
             headers={"Authorization": f"Bearer {bearer}"},
         )
         if status != 200:
-            raise SmokeFailure(f"/close -> {status}: {body!r}")
+            raise IntegrationFailure(f"/close -> {status}: {body!r}")
         steps_ok.append("close")
 
         status, body = _http(
@@ -243,14 +262,23 @@ def main() -> int:
         # 200 final (na tela de /login, ou 501 se OIDC não configurado
         # aqui, o que é esperado) confirma que o endpoint não quebrou.
         if status not in (200, 501):
-            raise SmokeFailure(f"/logout -> {status} inesperado: {body!r}")
+            raise IntegrationFailure(f"/logout -> {status} inesperado: {body!r}")
         steps_ok.append("logout")
 
-        print("\n✅ SMOKE-TEST PASSOU -- todos os passos:", steps_ok)
+        print("\n✅ INTEGRATION TEST PASSOU -- todos os passos:", steps_ok)
         return 0
 
-    except (SmokeFailure, EngineError) as exc:
-        print(f"\n❌ SMOKE-TEST FALHOU no passo após {steps_ok}: {exc}")
+    except (IntegrationFailure, EngineError) as exc:
+        print(f"\n❌ INTEGRATION TEST FALHOU no passo após {steps_ok}: {exc}")
+        _dump_central_log()
+        return 1
+    except Exception as exc:  # noqa: BLE001 -- qualquer falha crua e inesperada
+        # (ex.: TimeoutError de socket) também deve rodar cleanup (bloco
+        # finally abaixo) e mostrar o log do krewhub-central antes de sair,
+        # em vez de deixar uma traceback nua sem contexto do que o processo
+        # local via.
+        print(f"\n❌ INTEGRATION TEST FALHOU (erro inesperado) no passo após {steps_ok}: {exc!r}")
+        _dump_central_log()
         return 1
     finally:
         print("[8/8] cleanup ...")
@@ -265,7 +293,7 @@ def main() -> int:
         if handle is not None:
             try:
                 _kubectl(handle, "delete", "-f", MANIFESTS_PATH, "--ignore-not-found", "--wait=false")
-            except SmokeFailure as exc:
+            except IntegrationFailure as exc:
                 print(f"      aviso: cleanup dos manifests falhou (engine.down() ainda roda): {exc}")
         try:
             engine.down()
