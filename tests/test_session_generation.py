@@ -290,6 +290,32 @@ def test_logout_of_never_provisioned_owner_keeps_not_provisioned_routes_at_404(
     assert infra == {"revoke": [], "teardown": [], "issue_token": []}
 
 
+@pytest.mark.parametrize("failing", ["get_clients", "teardown_dev_workload"])
+def test_logout_bumps_generation_even_when_teardown_raises_unexpected_exception(
+    client, sign_cookie, settings, infra, monkeypatch, failing
+):
+    """Infra indisponivel (ex.: kubeconfig quebrado -> RuntimeError em
+    get_clients) nao pode deixar o token antigo valido: o bump roda
+    ANTES do teardown melhor-esforco."""
+    _provision(settings, OWNER_A)
+    gen_seen_by_k8s_call = []
+
+    def _raise(*_a, **_kw):
+        gen_seen_by_k8s_call.append(_current_gen(settings, OWNER_A))
+        raise RuntimeError("cluster indisponivel")
+
+    monkeypatch.setattr(k8s_manager, failing, _raise)
+    token = sign_cookie(OWNER_A)
+    client.cookies.set("krewhub_session", token)
+
+    _assert_cookie_cleared(client.get("/logout", follow_redirects=False))
+
+    assert gen_seen_by_k8s_call == [1]  # bump ja tinha rodado
+    assert _current_gen(settings, OWNER_A) == 1
+    r = client.get(f"/devs/{_path(OWNER_A)}", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 401
+
+
 def test_logout_with_stale_token_clears_cookie_without_bump_or_teardown(
     client, sign_cookie, settings, infra
 ):

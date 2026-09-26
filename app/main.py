@@ -454,12 +454,17 @@ def logout(request: Request) -> RedirectResponse:
     `/login` simplesmente começa um ciclo OIDC novo do zero, decisão
     deliberada.
 
+    Antes do teardown, incrementa a geracao de sessao do owner_id
+    (`store.bump_session_generation`) -- revoga TODO `krewhub_session`
+    ja emitido pra ele, inclusive em outras abas/dispositivos, mesmo que
+    o teardown falhe depois. `/close` NAO faz isso.
+
     TUDO que `_close_dev_session` faz é MELHOR ESFORÇO aqui -- diferente
     de `/close` (onde uma falha REAL de teardown vira 502), uma falha
     aqui (owner nunca provisionado, revogação ou teardown indisponível,
-    etc.) NÃO pode impedir o logout do KrewHub em si (limpar cookie +
-    redirect) -- mantém a garantia já testada de `/logout` nunca vazar
-    erro.
+    cluster inacessível, etc.) NÃO pode impedir o logout do KrewHub em
+    si (limpar cookie + redirect) -- mantém a garantia já testada de
+    `/logout` nunca vazar erro.
 
     `GET` simples, não `POST`/form -- a ação só afeta a sessão/workload
     de QUEM chamou (não muda estado de outro owner_id, não expõe nada
@@ -474,33 +479,41 @@ def logout(request: Request) -> RedirectResponse:
     é a sessão pra limpar o cookie -- só precisa saber, quando dá, pra
     tentar a revogação/teardown também)."""
     token = _extract_token(request)
+    owner_id: str | None = None
     if token:
         try:
             owner_id = _verify_session_checked(token)
         except auth.AuthTokenError:
             owner_id = None
-        if owner_id:
-            try:
-                _close_dev_session(owner_id)
-            except (ValueError, k8s_manager.TeardownError):
-                logger.warning(
-                    "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
-                )
-            # Incrementa a geracao de sessao (tabela propria
-            # `session_generations`, nunca uma linha em `devs` -- ver
-            # app/store.py) -- e o que da revogacao de verdade pro proprio
-            # krewhub_session (issue #2). Uma falha aqui (SQLite
-            # indisponivel) nao pode impedir o logout do KrewHub em si
-            # (limpar cookie + redirect).
-            try:
-                with store.connect(_settings.db_path) as conn:
-                    store.bump_session_generation(conn, owner_id)
-            except sqlite3.Error:
-                logger.warning(
-                    "falha ao incrementar a geracao de sessao no /logout pra owner_id=%s",
-                    owner_id,
-                    exc_info=True,
-                )
+    if owner_id:
+        # Incrementa a geracao de sessao PRIMEIRO (tabela propria
+        # `session_generations`, nunca uma linha em `devs` -- ver
+        # app/store.py) -- e o que da revogacao de verdade pro proprio
+        # krewhub_session (issue #2), e nao pode depender do teardown
+        # abaixo dar certo: justamente com a infra fora do ar, o token
+        # antigo tem que deixar de valer. Uma falha aqui (SQLite
+        # indisponivel) nao pode impedir o logout do KrewHub em si
+        # (limpar cookie + redirect).
+        try:
+            with store.connect(_settings.db_path) as conn:
+                store.bump_session_generation(conn, owner_id)
+        except sqlite3.Error:
+            logger.error(
+                "falha ao incrementar a geracao de sessao no /logout pra owner_id=%s",
+                owner_id,
+                exc_info=True,
+            )
+        # Teardown melhor esforco -- QUALQUER excecao (nao so
+        # TeardownError: get_clients pode levantar RuntimeError com
+        # kubeconfig/cluster indisponivel) so e logada.
+        try:
+            _close_dev_session(owner_id)
+        except ValueError:
+            logger.info("/logout pra owner_id=%s sem workload provisionado -- nada a desligar", owner_id)
+        except Exception:
+            logger.warning(
+                "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
+            )
 
     redirect = RedirectResponse("/login", status_code=302)
     # Mesmo critério de is_https já usado no /callback ao SETAR o cookie
