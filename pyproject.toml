@@ -18,4 +18,8 @@ package = false
 dev = [
     "httpx2>=2.13.1",
     "pytest>=9.1.1",
+    "krewhub-ext-aws-sso",
 ]
+
+[tool.uv.sources]
+krewhub-ext-aws-sso = { path = "extensions/aws-sso", editable = true }
