@@ -108,6 +108,17 @@ krewhubCentral:
 
   dbPath: /data/krewhub.db
 
+  # --- Extensões (docs/EXTENSIONS.md). Uma extensão precisa estar
+  # INSTALADA na imagem (build arg KREWHUB_EXTENSIONS do Dockerfile) e
+  # listada em `enabled` pra ficar disponível aos devs.
+  extensions:
+    # Ids habilitados, separados por vírgula (KREWHUB_EXTENSIONS_ENABLED).
+    # "" (default) = nenhuma. Exemplo: "aws-sso".
+    enabled: ""
+    # Variáveis de ambiente específicas de extensões, repassadas como
+    # estão. Exemplo: KREWHUB_EXT_AWS_SSO_IMAGE: ghcr.io/<owner>/krewhub-ext-aws-sso:0.1.0
+    env: {}
+
   # --- Template do pod-por-dev (kirocrew-<slug>) -- passthrough genérico
   # pras env vars que app/config.py já lê (consumidas por
   # app/k8s_templates.py) pra gerar o Pod/PVC/NetworkPolicy de

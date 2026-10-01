@@ -44,7 +44,7 @@ SIDECAR = "aws-sso"
 PORT = 4144
 STATE_DIR = "/state"
 CONFIG_DIR = "/etc/aws-sso"
-DEFAULT_IMAGE = "ghcr.io/krewhub/krewhub-ext-aws-sso:0.1.0"
+DEFAULT_IMAGE = "ghcr.io/lucasces/krewhub-ext-aws-sso:0.1.0"
 IMAGE_ENV = "KREWHUB_EXT_AWS_SSO_IMAGE"
 
 LOGIN_TAG = "awssso_login"
