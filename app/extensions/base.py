@@ -256,7 +256,7 @@ class ExtensionContext:
     container_default: str
     _exec: Callable[[str, str], str]
     _get_secret: Callable[[str], str | None]
-    _run_detached: Callable[..., str] | None = None
+    _run_detached: Callable[[str, tuple, str, tuple, tuple, float], str] | None = None
 
     def exec(self, script: str, *, container: str | None = None) -> str:
         return self._exec(container or self.container_default, script)
@@ -264,11 +264,32 @@ class ExtensionContext:
     def get_secret(self, key: str) -> str | None:
         return self._get_secret(key)
 
-    def run_detached(self, flow: Any) -> str:
-        """Executa um `pod_exec.DetachedFlow` (pty+FIFO) no Pod do dev."""
+    def run_detached(
+        self,
+        command: Sequence[str],
+        *,
+        tag: str,
+        script: Sequence[tuple[str, str]] = (),
+        done_markers: Sequence[str] = (),
+        timeout: float = 15.0,
+        container: str | None = None,
+    ) -> str:
+        """Roda `command` destacado sob um pty (processo interativo que
+        continua depois do hook, ex.: device-flow esperando o clique do
+        dev). `script` é `[(esperar_por, enviar), ...]`; o retorno é o log
+        assim que todos os `done_markers` aparecerem. O container precisa
+        de `python3`, `base64` e um /tmp gravável. `tag` só aceita
+        `[a-z0-9_]`."""
         if self._run_detached is None:
             raise ExtensionError("run_detached indisponível neste contexto")
-        return self._run_detached(flow)
+        return self._run_detached(
+            container or self.container_default,
+            tuple(command),
+            tag,
+            tuple(script),
+            tuple(done_markers),
+            timeout,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -249,7 +249,19 @@ def _make_context(
         container_default=ext.sidecar_name,
         _exec=_exec,
         _get_secret=_get_secret,
-        _run_detached=lambda flow: pod_exec.run_detached(c, pod_name, namespace, flow),
+        _run_detached=lambda container, command, tag, script, markers, timeout: pod_exec.run_detached(
+            c,
+            pod_name,
+            namespace,
+            pod_exec.DetachedFlow(
+                container=container,
+                command=command,
+                tag=tag,
+                script=script,
+                done_markers=markers,
+                stage_timeout=timeout,
+            ),
+        ),
     )
 
 
