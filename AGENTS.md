@@ -152,10 +152,12 @@ generic/empty).
   domain, or person — not in code, commit messages, or as literal
   text in `.gitignore` itself (an entry like `deploy/acme-corp/`
   would leak the name into version control even as an ignore rule).
-  The one `.gitignore` entry that exists for this class of file,
-  `values-*.yaml`, is a generic filename pattern that names no third
-  party — it's what keeps a real, filled-in cluster values file (e.g.
-  `charts/krewhub/examples/values-<your-cluster>.yaml`) out of git.
+  The `.gitignore` entries that exist for this class of file are
+  generic patterns that name no third party: `values-*.yaml` keeps a
+  real, filled-in cluster values file (e.g.
+  `charts/krewhub/examples/values-<your-cluster>.yaml`) out of git, and
+  `deploy/` keeps per-environment manifests and values kept next to the
+  checkout (e.g. `deploy/<environment>/`) out of it.
 - The Helm chart is generic by design — no default value in
   `charts/krewhub/values.yaml` assumes a specific cluster
   (StorageClass, domain, node topology, secret mechanism). Examples of
