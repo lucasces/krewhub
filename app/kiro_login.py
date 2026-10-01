@@ -39,38 +39,16 @@ polling continua rodando no pod depois que a função retorna."""
 
 from __future__ import annotations
 
-import base64
 import re
-import shlex
-import time
 
-from kubernetes.stream import stream
-
+from app import pod_exec
 from app.k8s_manager import Clients
-from app.k8s_templates import OWNER_LABEL_KEY
 
 MODES = ("org", "personal")
 
 _CODE_RE = re.compile(r"Code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})")
 _URL_RE = re.compile(r"Open this URL:\s*(\S+)")
 
-_DRIVER_SCRIPT = """import os, pty, sys
-
-FIFO = "/tmp/kiro_login_stdin_fifo"
-if not os.path.exists(FIFO):
-    os.mkfifo(FIFO)
-fd = os.open(FIFO, os.O_RDWR)
-os.dup2(fd, 0)
-
-pty.spawn(sys.argv[1:])
-"""
-_DRIVER_B64 = base64.b64encode(_DRIVER_SCRIPT.encode()).decode()
-
-_DRIVER_PATH = "/tmp/kiro_login_driver.py"
-_FIFO_PATH = "/tmp/kiro_login_stdin_fifo"
-_LOG_PATH = "/tmp/kiro_login_out.log"
-
-_POLL_INTERVAL = 0.5
 _STAGE_TIMEOUT = 15.0
 
 
@@ -79,29 +57,7 @@ class KiroLoginError(RuntimeError):
 
 
 def _find_kirocrew_pod(c: Clients, namespace: str, slug: str) -> str:
-    """Namespace agora é COMPARTILHADO entre devs -- precisa filtrar pelo
-    slug do dev, senão "app=kirocrew" sozinho pegaria o pod de qualquer
-    outro dev no mesmo namespace."""
-    selector = f"app=kirocrew,{OWNER_LABEL_KEY}={slug}"
-    pods = c.core.list_namespaced_pod(namespace, label_selector=selector)
-    running = [p for p in pods.items if p.status.phase == "Running"]
-    if not running:
-        raise KiroLoginError(f"nenhum pod 'kirocrew' Running em {namespace} pro slug={slug!r}")
-    return running[0].metadata.name
-
-
-def _exec_sh(c: Clients, pod_name: str, namespace: str, script: str) -> str:
-    return stream(
-        c.core.connect_get_namespaced_pod_exec,
-        pod_name,
-        namespace,
-        container="kirocrew",
-        command=["sh", "-c", script],
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
+    return pod_exec.find_dev_pod(c, namespace, slug, error_cls=KiroLoginError)
 
 
 def whoami(c: Clients, *, namespace: str, slug: str) -> tuple[bool, str]:
@@ -109,26 +65,9 @@ def whoami(c: Clients, *, namespace: str, slug: str) -> tuple[bool, str]:
     idempotência: se já tem sessão válida, não dispara device-flow novo,
     em nenhum dos dois modos."""
     pod_name = _find_kirocrew_pod(c, namespace, slug)
-    out = _exec_sh(c, pod_name, namespace, "kiro-cli whoami 2>&1; true")
+    out = pod_exec.exec_sh(c, pod_name, namespace, "kiro-cli whoami 2>&1; true")
     logged_in = "not logged in" not in out.lower()
     return logged_in, out.strip()
-
-
-def _wait_for(c: Clients, pod_name: str, namespace: str, needle: str, *, timeout: float) -> str:
-    deadline = time.monotonic() + timeout
-    log = ""
-    while time.monotonic() < deadline:
-        log = _exec_sh(c, pod_name, namespace, f"cat {_LOG_PATH} 2>/dev/null; true")
-        if needle in log:
-            return log
-        time.sleep(_POLL_INTERVAL)
-    raise KiroLoginError(
-        f"timeout ({timeout}s) esperando {needle!r} no log do device-flow. log atual: {log!r}"
-    )
-
-
-def _send_enter(c: Clients, pod_name: str, namespace: str) -> None:
-    _exec_sh(c, pod_name, namespace, f"printf '\\r' | tee {_FIFO_PATH} > /dev/null")
 
 
 def start_device_flow(
@@ -165,40 +104,33 @@ def start_device_flow(
     if already:
         return {"already_logged_in": True, "whoami": whoami_detail}
 
-    write_script = f"echo {_DRIVER_B64} | base64 -d | tee {_DRIVER_PATH} > /dev/null"
-    _exec_sh(c, pod_name, namespace, write_script)
-
     if mode == "org":
-        login_cmd = (
-            f"kiro-cli login --use-device-flow --license pro "
-            f"--identity-provider {shlex.quote(identity_provider)} "
-            f"--region {shlex.quote(region)}"
+        command = (
+            "kiro-cli", "login", "--use-device-flow", "--license", "pro",
+            "--identity-provider", identity_provider, "--region", region,
         )
-    else:
-        login_cmd = "kiro-cli login --use-device-flow"
-
-    launch_script = (
-        f"rm -f {_FIFO_PATH} {_LOG_PATH}; "
-        f"setsid python3 {_DRIVER_PATH} {login_cmd} "
-        f"> {_LOG_PATH} 2>&1 < /dev/null &"
-    )
-    _exec_sh(c, pod_name, namespace, launch_script)
-
-    if mode == "org":
         # Dois prompts pré-preenchidos (Start URL, depois Region) --
         # cada um só precisa de um Enter pra confirmar o default.
-        _wait_for(c, pod_name, namespace, "Enter Start URL", timeout=_STAGE_TIMEOUT)
-        _send_enter(c, pod_name, namespace)
-        _wait_for(c, pod_name, namespace, "Enter Region", timeout=_STAGE_TIMEOUT)
-        _send_enter(c, pod_name, namespace)
+        script = (("Enter Start URL", "\r"), ("Enter Region", "\r"))
     else:
+        command = ("kiro-cli", "login", "--use-device-flow")
         # Menu de seleção (Builder ID / Google / GitHub / Your
         # Organization) com "Use with Builder ID" já destacado -- um
         # Enter aceita esse default (confirmado ao vivo).
-        _wait_for(c, pod_name, namespace, "Select login method", timeout=_STAGE_TIMEOUT)
-        _send_enter(c, pod_name, namespace)
+        script = (("Select login method", "\r"),)
 
-    log = _wait_for(c, pod_name, namespace, "Open this URL", timeout=_STAGE_TIMEOUT)
+    flow = pod_exec.DetachedFlow(
+        container=pod_exec.MAIN_CONTAINER,
+        command=command,
+        tag="kiro_login",
+        script=script,
+        done_markers=("Open this URL",),
+        stage_timeout=_STAGE_TIMEOUT,
+    )
+    try:
+        log = pod_exec.run_detached(c, pod_name, namespace, flow)
+    except pod_exec.PodExecError as exc:
+        raise KiroLoginError(str(exc)) from exc
 
     code_match = _CODE_RE.search(log)
     url_match = _URL_RE.search(log)

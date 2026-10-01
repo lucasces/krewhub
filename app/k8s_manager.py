@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -160,40 +161,87 @@ def ensure_networkpolicy(c: Clients, namespace: str, slug: str, settings: Settin
     )
 
 
-def ensure_pod(c: Clients, namespace: str, slug: str, settings: Settings) -> str:
-    body = tpl.build_pod(namespace, slug, settings)
-    return _ensure(
-        read=c.core.read_namespaced_pod,
-        create=c.core.create_namespaced_pod,
-        patch=c.core.patch_namespaced_pod,
-        name=f"kirocrew-{slug}",
-        namespace=namespace,
-        body=body,
-    )
+_POD_GONE_TIMEOUT_S = 120
+
+
+def _wait_pod_gone(c: Clients, namespace: str, name: str, *, timeout_s: float, poll_s: float) -> None:
+    deadline = time.time() + timeout_s
+    while True:
+        try:
+            c.core.read_namespaced_pod(name, namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                return
+            raise
+        if time.time() >= deadline:
+            raise TimeoutError(f"pod {name} ainda existe após {timeout_s}s do delete")
+        time.sleep(poll_s)
+
+
+def _recreate_pod(c: Clients, namespace: str, name: str, body: dict, *, poll_s: float) -> str:
+    try:
+        c.core.delete_namespaced_pod(name, namespace)
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+    _wait_pod_gone(c, namespace, name, timeout_s=_POD_GONE_TIMEOUT_S, poll_s=poll_s)
+    c.core.create_namespaced_pod(namespace, body)
+    return "recreated"
+
+
+def ensure_pod(
+    c: Clients, namespace: str, slug: str, settings: Settings, *, body: dict | None = None, poll_s: float = 2
+) -> str:
+    """create se não existe; patch se o spec não mudou; delete + espera
+    sumir + create se mudou ("created"/"updated"/"recreated").
+
+    O spec de um Pod é imutável -- patch com spec diferente dá 422. A
+    anotação `krewhub.pespa.net/spec-hash` guarda o hash do spec com que
+    o Pod foi criado. Pod sem a anotação (criado por versão anterior) tenta
+    o patch e só recria se o apiserver recusar com 422. A recriação
+    interrompe o dev (workspace fica no PVC); ver `docs/ARCHITECTURE.md`."""
+    if body is None:
+        body = tpl.build_pod(namespace, slug, settings)
+    name = f"kirocrew-{slug}"
+    try:
+        existing = c.core.read_namespaced_pod(name, namespace)
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
+        c.core.create_namespaced_pod(namespace, body)
+        return "created"
+
+    if isinstance(existing.metadata.deletion_timestamp, datetime):
+        return _recreate_pod(c, namespace, name, body, poll_s=poll_s)
+
+    annotations = existing.metadata.annotations
+    current = annotations.get(tpl.SPEC_HASH_ANNOTATION) if isinstance(annotations, dict) else None
+    wanted = body["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION]
+    if current is not None and current != wanted:
+        return _recreate_pod(c, namespace, name, body, poll_s=poll_s)
+    try:
+        c.core.patch_namespaced_pod(name, namespace, body)
+    except ApiException as exc:
+        if exc.status == 422 and current is None:
+            return _recreate_pod(c, namespace, name, body, poll_s=poll_s)
+        raise
+    return "updated"
 
 
 def wait_for_ready(c: Clients, namespace: str, slug: str, *, timeout_s: int = 240, poll_s: int = 5) -> bool:
-    """Antes desta fatia isso lia `read_namespaced_deployment_status` e
-    conferia `status.ready_replicas` (semântica do ReplicaSet). Migrado
-    pra ler o `Pod` diretamente (`read_namespaced_pod` -- de propósito,
-    não `read_namespaced_pod_status`: assim o RBAC continua precisando
-    só de `get` em `pods`, sem precisar de uma regra nova pro
-    subrecurso `pods/status`) e considera Ready quando `status.phase ==
-    "Running"` E todo container reportado em `status.container_statuses`
-    está com `ready == True` (equivalente, pra 1 pod sem réplica, ao que
-    `ready_replicas >= 1` verificava antes)."""
+    """Lê o `Pod` direto (`read_namespaced_pod`, não `..._pod_status`: o
+    RBAC continua precisando só de `get` em `pods`) e considera pronto
+    quando `status.phase == "Running"` E o container `kirocrew` está
+    `ready`. Sidecars de extensão ficam de fora de propósito: a
+    readiness do Pod é global, e um sidecar que ainda espera ação do
+    dev (ex.: login SSO) não pode travar o acesso ao dashboard."""
     deadline = time.time() + timeout_s
     name = f"kirocrew-{slug}"
     while time.time() < deadline:
         pod = c.core.read_namespaced_pod(name, namespace)
         status = pod.status
-        container_statuses = status.container_statuses or []
-        ready = (
-            status.phase == "Running"
-            and bool(container_statuses)
-            and all(cs.ready for cs in container_statuses)
-        )
-        if ready:
+        main = [cs for cs in (status.container_statuses or []) if cs.name == "kirocrew"]
+        if status.phase == "Running" and main and main[0].ready:
             return True
         time.sleep(poll_s)
     return False

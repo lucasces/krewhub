@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 
-from app import session_client
+from app import pod_exec, session_client
 from app.k8s_templates import OWNER_LABEL_KEY
 
 
@@ -64,7 +64,7 @@ def test_issue_token_url_rewrites_internal_url_to_public_host(monkeypatch, fake_
         captured["command"] = kwargs["command"]
         return "http://localhost:5476?token=THE-TOKEN-VALUE\n"
 
-    monkeypatch.setattr(session_client, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", _fake_stream)
 
     url = session_client.issue_token_url(
         fake_clients,
@@ -86,7 +86,7 @@ def test_issue_token_url_default_scheme_is_http_unchanged(monkeypatch, fake_clie
         items=[_pod("kirocrew-dev-a-abc")]
     )
     monkeypatch.setattr(
-        session_client,
+        pod_exec,
         "stream",
         lambda *a, **kw: "http://localhost:5476?token=THE-TOKEN-VALUE\n",
     )
@@ -108,7 +108,7 @@ def test_issue_token_url_https_scheme_when_tls_terminates_at_the_edge(monkeypatc
         items=[_pod("kirocrew-dev-a-abc")]
     )
     monkeypatch.setattr(
-        session_client,
+        pod_exec,
         "stream",
         lambda *a, **kw: "http://localhost:5476?token=THE-TOKEN-VALUE\n",
     )
@@ -127,7 +127,7 @@ def test_issue_token_url_raises_when_no_token_in_output(monkeypatch, fake_client
     fake_clients.core.list_namespaced_pod.return_value = mock.Mock(
         items=[_pod("kirocrew-dev-a-abc")]
     )
-    monkeypatch.setattr(session_client, "stream", lambda *a, **kw: "algo deu errado, sem URL nenhuma")
+    monkeypatch.setattr(pod_exec, "stream", lambda *a, **kw: "algo deu errado, sem URL nenhuma")
     with pytest.raises(session_client.SessionError):
         session_client.issue_token_url(
             fake_clients,
@@ -150,7 +150,7 @@ def test_revoke_session_runs_kirocrew_logout_and_confirms_success(monkeypatch, f
         captured["namespace"] = namespace
         return "✅ All dashboard sessions revoked.\n"
 
-    monkeypatch.setattr(session_client, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", _fake_stream)
     result = session_client.revoke_session(fake_clients, namespace="krewhub-devs", slug="dev-a-test-local")
 
     assert "revoked" in result
@@ -167,7 +167,7 @@ def test_revoke_session_raises_when_no_success_marker(monkeypatch, fake_clients)
         items=[_pod("kirocrew-dev-a-abc")]
     )
     monkeypatch.setattr(
-        session_client, "stream", lambda *a, **kw: "❌ Gateway not running — start it with: kirocrew gateway"
+        pod_exec, "stream", lambda *a, **kw: "❌ Gateway not running — start it with: kirocrew gateway"
     )
     with pytest.raises(session_client.SessionError, match="n.o confirmou sucesso"):
         session_client.revoke_session(fake_clients, namespace="krewhub-devs", slug="dev-a-test-local")
@@ -180,7 +180,7 @@ def test_revoke_session_uses_slug_scoped_pod_not_other_dev(monkeypatch, fake_cli
     fake_clients.core.list_namespaced_pod.return_value = mock.Mock(
         items=[_pod("kirocrew-dev-a-abc")]
     )
-    monkeypatch.setattr(session_client, "stream", lambda *a, **kw: "✅ All dashboard sessions revoked.")
+    monkeypatch.setattr(pod_exec, "stream", lambda *a, **kw: "✅ All dashboard sessions revoked.")
     session_client.revoke_session(fake_clients, namespace="krewhub-devs", slug="dev-a-test-local")
 
     _, kwargs = fake_clients.core.list_namespaced_pod.call_args

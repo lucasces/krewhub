@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from app import k8s_manager, kiro_login, store
+from app import k8s_manager, kiro_login, pod_exec, store
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def test_start_device_flow_idempotent_skips_when_already_logged_in(monkeypatch, 
     )
     stream_calls = []
     monkeypatch.setattr(
-        kiro_login,
+        pod_exec,
         "stream",
         lambda *a, **kw: stream_calls.append(kw.get("command")) or "should not matter",
     )
@@ -182,14 +182,14 @@ def test_start_device_flow_idempotent_skips_when_already_logged_in(monkeypatch, 
 
 
 def test_whoami_parses_not_logged_in(monkeypatch, fake_clients):
-    monkeypatch.setattr(kiro_login, "stream", lambda *a, **kw: "kiro-cli: Not logged in\n")
+    monkeypatch.setattr(pod_exec, "stream", lambda *a, **kw: "kiro-cli: Not logged in\n")
     logged_in, detail = kiro_login.whoami(fake_clients, namespace="ns", slug="dev-a-test-local")
     assert logged_in is False
     assert "Not logged in" in detail
 
 
 def test_whoami_parses_logged_in(monkeypatch, fake_clients):
-    monkeypatch.setattr(kiro_login, "stream", lambda *a, **kw: "kiro-cli: logged in as dev-a@test.local\n")
+    monkeypatch.setattr(pod_exec, "stream", lambda *a, **kw: "kiro-cli: logged in as dev-a@test.local\n")
     logged_in, detail = kiro_login.whoami(fake_clients, namespace="ns", slug="dev-a-test-local")
     assert logged_in is True
 
@@ -215,7 +215,7 @@ def test_start_device_flow_personal_happy_path_parses_code_and_url(monkeypatch, 
             return log_content
         return ""
 
-    monkeypatch.setattr(kiro_login, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", _fake_stream)
 
     result = kiro_login.start_device_flow(fake_clients, namespace="ns", slug="dev-a-test-local", mode="personal")
     assert result["already_logged_in"] is False
@@ -247,7 +247,7 @@ def test_start_device_flow_org_uses_identity_provider_and_region_in_command(monk
             return log_content
         return ""
 
-    monkeypatch.setattr(kiro_login, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", _fake_stream)
 
     result = kiro_login.start_device_flow(
         fake_clients,

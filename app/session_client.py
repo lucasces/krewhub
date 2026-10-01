@@ -16,10 +16,8 @@ from __future__ import annotations
 import re
 import urllib.parse
 
-from kubernetes.stream import stream
-
+from app import pod_exec
 from app.k8s_manager import Clients
-from app.k8s_templates import OWNER_LABEL_KEY
 
 _TOKEN_URL_RE = re.compile(r"https?://\S+\?token=\S+")
 
@@ -29,16 +27,7 @@ class SessionError(RuntimeError):
 
 
 def _find_kirocrew_pod(c: Clients, namespace: str, slug: str) -> str:
-    """Namespace agora é COMPARTILHADO entre devs -- o label selector
-    precisa incluir o slug do dev, senão "app=kirocrew" sozinho casaria
-    com o pod de QUALQUER dev nesse namespace (bug real que existiria se
-    não fosse corrigido nesta fatia)."""
-    selector = f"app=kirocrew,{OWNER_LABEL_KEY}={slug}"
-    pods = c.core.list_namespaced_pod(namespace, label_selector=selector)
-    running = [p for p in pods.items if p.status.phase == "Running"]
-    if not running:
-        raise SessionError(f"nenhum pod 'kirocrew' Running em {namespace} pro slug={slug!r}")
-    return running[0].metadata.name
+    return pod_exec.find_dev_pod(c, namespace, slug, error_cls=SessionError)
 
 
 def issue_token_url(
@@ -55,17 +44,7 @@ def issue_token_url(
     pública correta (host/porta do CHP, não `localhost:5476` interno que
     o comando imprime por padrão -- só o `?token=...` é reaproveitado)."""
     pod_name = _find_kirocrew_pod(c, namespace, slug)
-    raw = stream(
-        c.core.connect_get_namespaced_pod_exec,
-        pod_name,
-        namespace,
-        container="kirocrew",
-        command=["kirocrew", "token", "--ttl", ttl],
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
+    raw = pod_exec.exec_command(c, pod_name, namespace, ["kirocrew", "token", "--ttl", ttl])
     match = _TOKEN_URL_RE.search(raw)
     if not match:
         raise SessionError(f"não consegui extrair a URL com token da saída: {raw!r}")
@@ -99,17 +78,7 @@ def revoke_session(c: Clients, *, namespace: str, slug: str) -> str:
     está rodando" quanto qualquer outra falha que `kirocrew logout`
     reporte."""
     pod_name = _find_kirocrew_pod(c, namespace, slug)
-    raw = stream(
-        c.core.connect_get_namespaced_pod_exec,
-        pod_name,
-        namespace,
-        container="kirocrew",
-        command=["kirocrew", "logout"],
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
+    raw = pod_exec.exec_command(c, pod_name, namespace, ["kirocrew", "logout"])
     if "✅" not in raw:  # único marcador de sucesso que `kiro_crew.cli_server._logout` imprime
         raise SessionError(f"kirocrew logout não confirmou sucesso: {raw!r}")
     return raw.strip()

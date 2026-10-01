@@ -55,6 +55,8 @@ docs/ARCHITECTURE.md, não escondido."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 
 from app.config import Settings
@@ -233,6 +235,18 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
     }
 
 
+SPEC_HASH_ANNOTATION = "krewhub.pespa.net/spec-hash"
+
+
+def spec_hash(spec: dict) -> str:
+    """Hash estável do `spec` final do Pod (já com overlay e extensões).
+    O spec de um Pod é imutável no apiserver -- mudar imagem, sidecar ou
+    volume exige recriar. Comparar esse hash com a anotação do Pod
+    existente é o que diz se precisa."""
+    canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
 def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
     """Antes desta fatia, este era `build_deployment` (gerava um
     `Deployment` de 1 réplica com `strategy: Recreate`, ver
@@ -352,4 +366,8 @@ def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
             ],
         },
     }
-    return apply_overlay(manifest, load_overlay_ops(settings, "pod"))
+    manifest = apply_overlay(manifest, load_overlay_ops(settings, "pod"))
+    manifest["metadata"].setdefault("annotations", {})[SPEC_HASH_ANNOTATION] = spec_hash(
+        manifest["spec"]
+    )
+    return manifest
