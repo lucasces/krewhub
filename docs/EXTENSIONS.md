@@ -192,13 +192,12 @@ start URL, required), `sso_region` (required) and `default_region`
   developer picks one with `apply_roles`. `refresh_roles` re-reads the
   available roles and `reload_creds` refreshes the credentials.
 
-**Image.** The sidecar image is built from `extensions/aws-sso/` on top
-of the official `synfinatic/aws-sso-cli-ecs-server` image, pinned by tag
-and digest, with `python3` and the supervisor added. It runs as a
-non-root user and the Pod drops all its capabilities. The release
-workflow publishes it as `ghcr.io/<owner>/krewhub-ext-aws-sso`. Set the
-image used by Pods with the environment variable
-`KREWHUB_EXT_AWS_SSO_IMAGE` (Helm: `krewhubCentral.extensions.env`).
+**Image.** The sidecar image is built from `extensions/aws-sso/` with
+`aws-sso-cli` pinned by version and SHA-256, runs as a non-root user and
+drops all capabilities. The release workflow publishes it as
+`ghcr.io/<owner>/krewhub-ext-aws-sso`. Set the image used by Pods with
+the environment variable `KREWHUB_EXT_AWS_SSO_IMAGE` (Helm:
+`krewhubCentral.extensions.env`).
 
 **Helm example.**
 
@@ -212,10 +211,6 @@ krewhubCentral:
 
 ## Known limitations
 
-- **The `aws-sso` sidecar image is `linux/amd64` only.** Its base, the
-  official `aws-sso-cli` ECS server image, has no arm64 build, so the
-  extension cannot run on arm64 nodes until upstream publishes one or
-  the image is built from the release binary instead.
 - **The `aws-sso` device-code login is not validated on a real cluster.**
   The code assumes `aws-sso login --url-action print` runs through the
   same pseudo-terminal driver as the Kiro login and prints the

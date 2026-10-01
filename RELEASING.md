@@ -1,18 +1,16 @@
 # Releasing
 
-This project publishes three artifacts on every release: the
+This project publishes two artifacts on every release: the
 `krewhub-central` container image (multi-arch, `linux/amd64` +
-`linux/arm64`), the `krewhub-ext-aws-sso` sidecar image of the AWS SSO
-extension (`linux/amd64` only, see
-[`docs/EXTENSIONS.md`](docs/EXTENSIONS.md)) and the `charts/krewhub`
-Helm chart, all to GHCR (`ghcr.io/<owner>`). All are built and pushed by
+`linux/arm64`) and the `charts/krewhub` Helm chart, both to GHCR
+(`ghcr.io/<owner>`). Both are built and pushed by
 [`.github/workflows/release.yml`](.github/workflows/release.yml),
 triggered by pushing a tag matching `v*`.
 
 Pushing the tag *is* the release action; there is no manual approval
 gate in front of publishing. `release.yml` runs the CI checks first
 (`needs:` on the same test/lint job used for every push and PR), then
-builds and pushes the images and the chart automatically.
+builds and pushes the image and the chart automatically.
 
 Confirm, in **Settings → Actions → General → Workflow permissions**,
 that "Read and write permissions" is selected (or that `packages: write`
@@ -74,7 +72,7 @@ artifact.
 
 ## Auth
 
-The image and chart publish jobs log in to `ghcr.io` using
+Both the image and chart publish jobs log in to `ghcr.io` using
 `${{ github.actor }}` / `${{ secrets.GITHUB_TOKEN }}` (no PAT). This
 works out of the box for a **new** package that doesn't exist in GHCR
 yet — the first authenticated push creates it, linked to this
