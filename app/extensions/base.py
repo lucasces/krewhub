@@ -327,8 +327,9 @@ class Extension:
         raise ExtensionError(f"ação desconhecida: {action_id}")
 
     def lobby_card(self, ctx: ExtensionContext) -> Card | None:
-        """Cartão extra do lobby; default: o cartão do `status`."""
-        return self.status(ctx).card
+        """Cartão do lobby, quando difere do cartão do `status`. `None`
+        (default) = o core usa o cartão devolvido por `status`."""
+        return None
 
     def on_pod_ready(self, ctx: ExtensionContext) -> None:
         """Chamado uma vez por provisionamento, depois que o Pod fica

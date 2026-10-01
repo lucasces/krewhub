@@ -155,3 +155,11 @@ def test_reconcile_with_plan_creates_ext_resources_before_the_pod(fake_clients):
     assert order.index("krewhub-ext-files-dev-a-test-local") < order.index("pod")
     pod = fake_clients.core.create_namespaced_pod.call_args.args[1]
     assert [c["name"] for c in pod["spec"]["containers"]] == ["kirocrew", "demo"]
+
+
+def test_wipe_ext_secret_keys_prefix_only_touches_that_extension(fake_clients):
+    fake_clients.core.read_namespaced_secret.side_effect = None
+    fake_clients.core.read_namespaced_secret.return_value = _secret({"demo.a": 1, "demo2.b": 1, "x.c": 1})
+    wiped = k8s_manager.wipe_ext_secret_keys(fake_clients, "ns", "alice", prefix="demo.")
+    assert wiped == ["demo.a"]
+    assert fake_clients.core.patch_namespaced_secret.call_args.args[2] == {"data": {"demo.a": None}}

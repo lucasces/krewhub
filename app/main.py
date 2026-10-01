@@ -23,7 +23,12 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import auth, chp_client, k8s_manager, kiro_login, session_client, store
+from app import extensions as ext_registry
+from app import k8s_templates as tpl
 from app.config import Settings, load_settings
+from app.extensions import runtime as ext_runtime
+from app.extensions import ui as ext_ui
+from app.extensions.contributions import ContributionError
 from app.oidc import OIDCConfigError, build_authorization_url, exchange_code
 
 logging.basicConfig(level=logging.INFO)
@@ -343,7 +348,25 @@ def callback(
     return redirect
 
 
-def _close_dev_session(owner_id: str) -> dict:
+def _cleanup_extensions(owner_id: str, c, *, all_secrets: bool) -> None:
+    """Parte de extensões do `/close`/`/logout`: remove o ConfigMap de
+    arquivos e apaga chaves do Secret `krewhub-ext-<slug>` (merge patch
+    com `null`; o RBAC não tem `delete` em secrets) -- TODAS no
+    `/logout`, só as `generated` no `/close` (o que o dev digitou
+    sobrevive). Melhor esforço: nunca levanta. Sem extensões habilitadas
+    e sem estado salvo pro dev, não toca no cluster."""
+    try:
+        with store.connect(_settings.db_path) as conn:
+            has_state = bool(store.list_extensions(conn, owner_id))
+        if not has_state and not ext_registry.enabled_extensions(_settings):
+            return
+        k8s_manager.teardown_ext_resources(c, _settings.dev_namespace, tpl.slugify(owner_id))
+        ext_runtime.wipe_secrets(_settings, owner_id, generated_only=not all_secrets, c=c)
+    except Exception:
+        logger.warning("limpeza das extensões falhou pra owner_id=%s", owner_id, exc_info=True)
+
+
+def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> dict:
     """Núcleo reaproveitado por `GET /close` (reporta erro pro chamador,
     via HTTP) e `GET /logout` (melhor esforço -- uma falha aqui NÃO pode
     impedir o logout do KrewHub em si, ver `logout` abaixo).
@@ -377,10 +400,20 @@ def _close_dev_session(owner_id: str) -> dict:
     `store.upsert` (só sobrescreve namespace/host/status/detail, NUNCA
     `login_mode`/`login_identity_provider`/`login_region`), sem apagar a
     linha -- é o que deixa o próximo `/provision`/`/open`/`/lobby`
-    reautenticar rápido, sem refazer OIDC nem o form do lobby."""
+    reautenticar rápido, sem refazer OIDC nem o form do lobby.
+
+    Extensões (`_cleanup_extensions`): roda DEPOIS do teardown, mas mesmo
+    quando ele falha -- uma falha de teardown não pode deixar credenciais
+    de extensão no Secret. `wipe_all_ext_secrets=True` (só `/logout`)
+    apaga todas as chaves; `/close` apaga só as geradas."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
+        if wipe_all_ext_secrets:
+            try:
+                _cleanup_extensions(owner_id, k8s_manager.get_clients(_settings), all_secrets=True)
+            except Exception:
+                logger.warning("limpeza das extensões falhou pra owner_id=%s", owner_id, exc_info=True)
         raise ValueError(f"owner_id={owner_id!r} não provisionado")
 
     c = k8s_manager.get_clients(_settings)
@@ -395,7 +428,12 @@ def _close_dev_session(owner_id: str) -> dict:
             owner_id, exc,
         )
 
-    teardown_result = k8s_manager.teardown_dev_workload(c, namespace=row["namespace"], slug=row["slug"])
+    try:
+        teardown_result = k8s_manager.teardown_dev_workload(
+            c, namespace=row["namespace"], slug=row["slug"]
+        )
+    finally:
+        _cleanup_extensions(owner_id, c, all_secrets=wipe_all_ext_secrets)
 
     with store.connect(_settings.db_path) as conn:
         store.upsert(
@@ -525,7 +563,7 @@ def logout(request: Request) -> RedirectResponse:
         # TeardownError: get_clients pode levantar RuntimeError com
         # kubeconfig/cluster indisponivel) so e logada.
         try:
-            _close_dev_session(owner_id)
+            _close_dev_session(owner_id, wipe_all_ext_secrets=True)
         except ValueError:
             logger.info("/logout pra owner_id=%s sem workload provisionado -- nada a desligar", owner_id)
         except Exception:
@@ -557,7 +595,17 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
     if not owner_id.strip():
         raise HTTPException(status_code=400, detail="owner_id vazio")
 
-    result = k8s_manager.reconcile_dev(_settings, owner_id)
+    try:
+        plans = ext_runtime.build_plans(_settings, owner_id)
+        # Só passa os planos quando há extensões ativas (o reconcile sem
+        # extensões segue exatamente como era).
+        result = (
+            k8s_manager.reconcile_dev(_settings, owner_id, plans)
+            if plans
+            else k8s_manager.reconcile_dev(_settings, owner_id)
+        )
+    except ContributionError as exc:
+        raise HTTPException(status_code=422, detail=f"extensão inválida: {exc}") from exc
     namespace = result["namespace"]
 
     with store.connect(_settings.db_path) as conn:
@@ -590,6 +638,8 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
                 status_code=504,
                 detail=f"pod em {namespace} não ficou Ready dentro do timeout",
             )
+        if plans:
+            ext_runtime.on_pod_ready_best_effort(_settings, owner_id, c)
 
     target = f"http://kirocrew-{result['slug']}.{namespace}.svc.cluster.local:5476"
     c = k8s_manager.get_clients(_settings)
@@ -799,7 +849,29 @@ def kiro_login_start(
     return {"owner_id": owner_id, "mode": mode, **result}
 
 
-def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
+async def _form_fields(request: Request) -> dict[str, str]:
+    """Todos os campos string do form -- as extensões declaram campos
+    dinâmicos (`ext.<id>.<chave>`) que o `Form(...)` do FastAPI não
+    conhece de antemão."""
+    form = await request.form()
+    return {k: v for k, v in form.items() if isinstance(v, str)}
+
+
+def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = None) -> str:
+    """Seção "Extensões" do form do lobby: uma caixa por extensão
+    habilitada pelo admin (vazio se nenhuma). Valores de campos `secret`
+    nunca voltam preenchidos."""
+    exts = ext_registry.enabled_extensions(_settings)
+    if not exts:
+        return ""
+    with store.connect(_settings.db_path) as conn:
+        rows = store.list_extensions(conn, owner_id)
+    return ext_ui.render_config_section(
+        [(ext, rows.get(ext_id), (errors or {}).get(ext_id, [])) for ext_id, ext in exts.items()]
+    )
+
+
+def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dict | None = None) -> str:
     """HTML puro (sem JS/framework) -- form de escolha da sessão, servido
     ANTES do provision rodar. `identity_provider`/`region` vêm
     pré-preenchidos com o default de KREWHUB_KIRO_IDENTITY_PROVIDER/
@@ -811,6 +883,7 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
     )
     default_ip = html.escape(_settings.kiro_identity_provider)
     default_region = html.escape(_settings.kiro_region)
+    extensions_html = _extensions_form_html(owner_id, ext_errors)
     return f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- nova sessão</title></head>
@@ -833,6 +906,7 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
         <input type="text" name="region" value="{default_region}" size="20"
                placeholder="us-east-1"></label>
     </fieldset>
+    {extensions_html}
     <br>
     <button type="submit">Iniciar sessão</button>
   </form>
@@ -846,6 +920,7 @@ def _lobby_result_html(
     dashboard_url_with_token: str | None,
     kiro_result: dict | None,
     kiro_error: str | None,
+    extensions_html: str = "",
 ) -> str:
     """Ordem deliberada: login do kiro-cli PRIMEIRO, dashboard DEPOIS --
     sem o login completo, o dashboard mostra a tela de "sandbox
@@ -921,6 +996,7 @@ def _lobby_result_html(
   -- os links abrem em aba nova, esta página continua aberta.</p>
   {kiro_html}
   {dash_html}
+  {extensions_html}
   {session_links_html}
 </body>
 </html>"""
@@ -970,6 +1046,13 @@ def _run_lobby_session(
             dashboard_url_with_token=provision_result.get("dashboard_url_with_token"),
             kiro_result=kiro_result,
             kiro_error=kiro_error,
+            # Cartões das extensões carregam à parte (iframe -> GET
+            # /extensions/cards): hooks de status nunca bloqueiam o lobby.
+            extensions_html=(
+                ext_ui.render_cards_iframe(owner_id)
+                if ext_runtime.active_extensions(_settings, owner_id)
+                else ""
+            ),
         )
     )
 
@@ -1021,6 +1104,7 @@ def lobby_submit(
     login_mode: str = Form(...),
     identity_provider: str = Form(""),
     region: str = Form(""),
+    form_fields: dict[str, str] = Depends(_form_fields),
     _owner: str = Depends(require_owner),
 ) -> HTMLResponse:
     """Recebe a escolha do form, PERSISTE (store.set_login_choice),
@@ -1053,6 +1137,15 @@ def lobby_submit(
                 ),
             )
 
+    ext_changes, ext_errors = ext_runtime.parse_form(_settings, owner_id, form_fields)
+    if ext_errors:
+        return HTMLResponse(_lobby_form_html(owner_id, ext_errors=ext_errors), status_code=400)
+    try:
+        ext_runtime.save_form(_settings, owner_id, ext_changes)
+    except Exception as exc:
+        logger.error("falha ao salvar a config das extensões de owner_id=%s", owner_id, exc_info=True)
+        raise HTTPException(status_code=502, detail="falha ao salvar a configuração das extensões") from exc
+
     with store.connect(_settings.db_path) as conn:
         store.set_login_choice(
             conn,
@@ -1079,3 +1172,59 @@ def get_dev(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
     return dict(row)
+
+
+@app.get("/devs/{owner_id}/extensions")
+def extensions_status(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+    """Estado (JSON) das extensões habilitadas pelo admin: `state`,
+    `conditions` e ações disponíveis de cada uma."""
+    views = ext_runtime.evaluate(_settings, owner_id)
+    return {"extensions": [v.to_json() for v in views]}
+
+
+@app.get("/devs/{owner_id}/extensions/cards", response_class=HTMLResponse)
+def extensions_cards(owner_id: str, _owner: str = Depends(require_owner)) -> HTMLResponse:
+    """Cartões das extensões (HTML puro, sem JS). Embutido via `<iframe>`
+    na página final do lobby; recarrega sozinho (`meta refresh`) enquanto
+    alguma extensão está `pending`."""
+    views = ext_runtime.evaluate(_settings, owner_id)
+    refresh = 5 if any(v.state == "pending" for v in views) else None
+    return HTMLResponse(
+        ext_ui.render_cards_document(
+            owner_id,
+            [v.card_view() for v in views],
+            lambda ext_id, action_id: ext_runtime.make_csrf(
+                _settings.session_secret, owner_id, ext_id, action_id
+            ),
+            refresh_seconds=refresh,
+        )
+    )
+
+
+@app.post("/devs/{owner_id}/extensions/{ext_id}/actions/{action_id}")
+def extension_action(
+    owner_id: str,
+    ext_id: str,
+    action_id: str,
+    request: Request,
+    form_fields: dict[str, str] = Depends(_form_fields),
+    _owner: str = Depends(require_owner),
+):
+    """Executa uma ação declarada pela extensão. Browser (cookie de
+    sessão): exige o token anti-CSRF do cartão (HMAC amarrado a
+    owner+extensão+ação, com validade) e responde 303 de volta aos
+    cartões. Chamada programática com `Authorization: Bearer`: sem CSRF
+    (o header não é enviado automaticamente pelo browser) e resposta
+    JSON."""
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, ext_id, action_id
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
+    try:
+        result = ext_runtime.run_action(_settings, owner_id, ext_id, action_id, form_fields)
+    except ext_runtime.ActionRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if bearer or not _wants_html(request):
+        return {"ok": result.ok, "message": result.message}
+    return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/extensions/cards", status_code=303)

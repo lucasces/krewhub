@@ -185,11 +185,17 @@ def ensure_ext_secret(
 
 
 def wipe_ext_secret_keys(
-    c: Clients, namespace: str, slug: str, keys: tuple[str, ...] | list[str] | None = None
+    c: Clients,
+    namespace: str,
+    slug: str,
+    keys: tuple[str, ...] | list[str] | None = None,
+    *,
+    prefix: str | None = None,
 ) -> list[str]:
     """Remove chaves do Secret `krewhub-ext-<slug>` SEM `delete` no RBAC:
     JSON merge patch com `null` (RFC 7386) apaga a chave. `keys=None`
-    apaga todas. Content-Type forçado -- o cliente python escolheria
+    apaga todas; `prefix` restringe às chaves que começam com ele
+    (ex.: `"demo."` = tudo de uma extensão). Content-Type forçado -- o cliente python escolheria
     strategic-merge pra um body dict. Secret ausente = nada a fazer.
     Devolve as chaves realmente apagadas."""
     name = secret_name(slug)
@@ -197,7 +203,10 @@ def wipe_ext_secret_keys(
     if existing is None:
         return []
     present = set((getattr(existing, "data", None) or {}).keys())
-    targets = sorted(present if keys is None else present & set(keys))
+    targets = present if keys is None else present & set(keys)
+    if prefix is not None:
+        targets = {k for k in targets if k.startswith(prefix)}
+    targets = sorted(targets)
     if not targets:
         return []
     c.core.patch_namespaced_secret(
