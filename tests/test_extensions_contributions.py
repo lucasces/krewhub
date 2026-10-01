@@ -54,6 +54,20 @@ def test_contribution_changes_the_spec_hash(settings):
     assert plain["metadata"]["annotations"][ann] != with_ext["metadata"]["annotations"][ann]
 
 
+def test_files_content_changes_the_spec_hash_but_plain_pods_keep_theirs(settings):
+    def pod(content):
+        contrib = PodContribution(
+            containers=[_side(volumeMounts=[{"name": "demo-files", "mountPath": "/etc/demo"}])],
+            files={"a.yaml": content},
+        )
+        return _build(settings, ("demo", contrib))["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION]
+
+    assert pod("one") != pod("two")
+    assert pod("one") == pod("one")
+    plain = tpl.build_pod("krewhub-devs", "alice", settings)
+    assert plain["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION] == tpl.spec_hash(plain["spec"])
+
+
 def test_files_become_a_configmap_volume_with_items(settings):
     contrib = PodContribution(
         containers=[_side(volumeMounts=[{"name": "demo-files", "mountPath": "/etc/demo"}])],

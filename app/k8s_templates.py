@@ -62,7 +62,7 @@ from typing import Sequence
 
 from app.config import Settings
 from app.extensions.base import PodContribution
-from app.extensions.contributions import merge_contributions
+from app.extensions.contributions import collect_files, merge_contributions
 from app.overlay import apply_overlay, load_overlay_ops
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -241,12 +241,18 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
 SPEC_HASH_ANNOTATION = "krewhub.pespa.net/spec-hash"
 
 
-def spec_hash(spec: dict) -> str:
+def spec_hash(spec: dict, files: dict[str, str] | None = None) -> str:
     """Hash estável do `spec` final do Pod (já com overlay e extensões).
     O spec de um Pod é imutável no apiserver -- mudar imagem, sidecar ou
     volume exige recriar. Comparar esse hash com a anotação do Pod
-    existente é o que diz se precisa."""
-    canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), default=str)
+    existente é o que diz se precisa.
+
+    `files` é o conteúdo dos arquivos das extensões (ConfigMap): o spec só
+    referencia as chaves, mas um sidecar que lê o arquivo no start precisa
+    ser recriado quando o conteúdo muda. Sem arquivos, o hash é o do spec
+    puro (Pods sem extensões não são recriados por isso)."""
+    payload = {"spec": spec, "files": files} if files else spec
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
@@ -380,6 +386,6 @@ def build_pod(
     manifest = apply_overlay(manifest, load_overlay_ops(settings, "pod"))
     manifest["metadata"].setdefault("annotations", {}).update(extra_annotations)
     manifest["metadata"]["annotations"][SPEC_HASH_ANNOTATION] = spec_hash(
-        manifest["spec"]
+        manifest["spec"], collect_files(contributions)
     )
     return manifest
