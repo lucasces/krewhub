@@ -58,8 +58,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from typing import Sequence
 
 from app.config import Settings
+from app.extensions.base import PodContribution
+from app.extensions.contributions import merge_contributions
 from app.overlay import apply_overlay, load_overlay_ops
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -247,7 +250,12 @@ def spec_hash(spec: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
+def build_pod(
+    namespace: str,
+    slug: str,
+    settings: Settings,
+    contributions: Sequence[tuple[str, PodContribution]] = (),
+) -> dict:
     """Antes desta fatia, este era `build_deployment` (gerava um
     `Deployment` de 1 réplica com `strategy: Recreate`, ver
     docs/ARCHITECTURE.md, seção "Pure Pod instead of Deployment for the
@@ -366,8 +374,12 @@ def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
             ],
         },
     }
+    # Extensões entram ANTES do overlay (o overlay do admin tem a última
+    # palavra) e antes do hash (mudou a contribuição -> recria o Pod).
+    extra_annotations = merge_contributions(manifest["spec"], slug, contributions)
     manifest = apply_overlay(manifest, load_overlay_ops(settings, "pod"))
-    manifest["metadata"].setdefault("annotations", {})[SPEC_HASH_ANNOTATION] = spec_hash(
+    manifest["metadata"].setdefault("annotations", {}).update(extra_annotations)
+    manifest["metadata"]["annotations"][SPEC_HASH_ANNOTATION] = spec_hash(
         manifest["spec"]
     )
     return manifest
