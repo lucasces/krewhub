@@ -18,6 +18,7 @@ Regras (cada violação levanta `ContributionError`):
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from app.extensions.base import PodContribution, files_volume_name
@@ -29,6 +30,17 @@ FILES_CONFIGMAP_PREFIX = "krewhub-ext-files-"
 
 class ContributionError(ValueError):
     pass
+
+
+@dataclass
+class ExtPlan:
+    """O que o reconcile precisa saber de uma extensão ativa: sua
+    contribuição ao Pod e as chaves (`<id>.<campo>`) de campos `generated`
+    que o Secret `krewhub-ext-<slug>` deve conter."""
+
+    ext_id: str
+    contribution: PodContribution
+    generated_keys: tuple[str, ...] = field(default_factory=tuple)
 
 
 def files_configmap_name(slug: str) -> str:

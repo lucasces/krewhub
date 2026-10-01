@@ -132,12 +132,16 @@ def secret_key(ext_id: str, key: str) -> str:
     return f"{ext_id}.{key}"
 
 
-def secret_env(env_name: str, slug: str, ext_id: str, key: str) -> dict:
-    """Entrada de `env` de container lendo uma chave do Secret da extensão."""
-    return {
-        "name": env_name,
-        "valueFrom": {"secretKeyRef": {"name": secret_name(slug), "key": secret_key(ext_id, key)}},
-    }
+def secret_env(env_name: str, slug: str, ext_id: str, key: str, *, optional: bool = False) -> dict:
+    """Entrada de `env` de container lendo uma chave do Secret da extensão.
+    Campos `generated` sempre existem (o core os cria antes do Pod);
+    campos `secret` informados pelo dev podem faltar -- use
+    `optional=True` pra o container subir mesmo assim (a variável só
+    aparece após o Pod ser recriado com o valor já salvo)."""
+    ref = {"name": secret_name(slug), "key": secret_key(ext_id, key)}
+    if optional:
+        ref["optional"] = True
+    return {"name": env_name, "valueFrom": {"secretKeyRef": ref}}
 
 
 def generate_secret() -> str:
