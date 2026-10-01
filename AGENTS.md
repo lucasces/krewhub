@@ -68,6 +68,15 @@ generic/empty).
 
 ## Technical gotchas
 
+- Extensions (`app/extensions/`, plugins under `extensions/`) are
+  documented in `docs/EXTENSIONS.md`. The `dev` group installs
+  `krewhub-ext-aws-sso` as an editable path dependency so tests load
+  the real entry point; `uv sync --no-dev` leaves it out of the image,
+  which installs plugins only through the `KREWHUB_EXTENSIONS` build
+  arg. Plugins must not depend on `krewhub`, and the dataclasses in
+  `app/extensions/base.py` are a public API: changing them needs an
+  `API_VERSION` bump.
+
 - The CHP API uses the header `Authorization: token <value>` (not
   `Bearer`) — `app/chp_client.py`. `Bearer` is the format for KrewHub's
   own session token, a different endpoint.

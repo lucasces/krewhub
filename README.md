@@ -38,6 +38,10 @@ by hand.
 - **Per-dev network isolation**: all devs share a single namespace,
   isolated from each other via `NetworkPolicy` (not by namespace
   boundary).
+- **Extensions**: optional, admin-enabled plugins that add sidecars,
+  files and credentials to each workspace, with a status card in the
+  lobby. The first one, `aws-sso`, provides AWS credentials from IAM
+  Identity Center — see [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
 - **Generic Helm chart**: no default assumes a specific cluster's
   StorageClass, domain, or node topology.
 - **Per-cluster JSON Patch overlay**: infrastructure peculiarities
@@ -136,6 +140,9 @@ The main `values.yaml` groups to know:
   for any cluster peculiarity that doesn't fit a dedicated field
   (nodeAffinity, tolerations, etc.) — see
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#per-cluster-json-patch-overlay).
+- **`krewhubCentral.extensions`** — `enabled` (comma-separated ids of
+  installed extensions to turn on) and `env` (extension-specific
+  settings); see [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
 - **`chp.affinity`/`chp.nodeSelector`/`chp.tolerations`** — proxy
   scheduling, for clusters with dedicated nodepools/taints.
 - **`krewhubCentral.oidc`** — reference to the Secret holding the IdP
