@@ -74,6 +74,12 @@ def test_render_config_is_device_code_with_global_auth_workflow():
     assert render_config({**CFG, "default_region": ""}).count("us-east-1") == 2
 
 
+def test_render_config_pins_profile_to_account_id_and_role():
+    """O default do aws-sso-cli usa o NOME da conta no perfil (parênteses,
+    acentos...). O id zero-preenchido tem alfabeto fechado."""
+    assert 'ProfileFormat: "{{ .AccountIdPad }}:{{ .RoleName }}"\n' in render_config(CFG)
+
+
 def test_default_region_falls_back_to_sso_region():
     ext = AwsSsoExtension()
     ctx = base.BuildContext("dev@test.local", "dev-test-local", "ns", {**CFG, "default_region": ""}, None)
@@ -161,12 +167,12 @@ def test_status_ignores_stale_login_link():
 
 
 def test_status_logged_in_without_role_then_ready():
-    st = _status({"server": True, "logged_in": True, "roles": 2, "role_names": ["a:Admin", "b:Dev"], "profile": ""})
+    st = _status({"server": True, "logged_in": True, "roles": 2, "role_names": ["111111111111:Admin", "222222222222:Dev"], "profile": ""})
     assert st.state == "needs_action"
-    assert "a:Admin" in " ".join(st.card.messages)
-    st = _status({"server": True, "logged_in": True, "profile": "a:Admin", "loaded": True})
+    assert "111111111111:Admin" in " ".join(st.card.messages)
+    st = _status({"server": True, "logged_in": True, "profile": "111111111111:Admin", "loaded": True})
     assert st.state == "ready"
-    assert ("Papel", "a:Admin") in st.card.rows
+    assert ("Papel", "111111111111:Admin") in st.card.rows
     assert st.conditions["sso.role_selected"] and st.conditions["sso.creds_loaded"]
 
 
@@ -197,9 +203,9 @@ def test_apply_roles_rejects_shell_metacharacters():
 def test_apply_roles_writes_quoted_request():
     ran: list[str] = []
     ext = AwsSsoExtension()
-    res = ext.handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": "123:Admin"})
+    res = ext.handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": "123456789012:Admin"})
     assert res.ok
-    assert "/state/req/profile" in ran[0] and "123:Admin" in ran[0]
+    assert "/state/req/profile" in ran[0] and "123456789012:Admin" in ran[0]
 
 
 def test_start_login_parses_url_and_code_and_stores_them():
@@ -352,7 +358,7 @@ def test_unknown_profile_is_rejected_by_supervisor(sidecar):
     s.tick()
     (state / "login_ok").touch()
     s.tick()
-    (state / "req/profile").write_text("999:Nope")
+    (state / "req/profile").write_text("999999999999:Nope")
     s.tick()
     st = _status_file(state)
     assert st["profile"] == "" and "desconhecido" in st["error"]
@@ -398,3 +404,132 @@ def test_requests_without_login_are_discarded(sidecar):
     s.tick()
     assert not (state / "req/profile").exists()
     assert _status_file(state)["profile"] == ""
+
+
+# --- perfil = <id da conta>:<papel>; nome da conta é só rótulo -----------------
+
+TRICKY_NAMES = [
+    "EdSaraiva(AdministradorAWS-AMAZON)",
+    "RedaçãoNota1000",
+    'Produção (Cliente, A) "x"',
+    "Conta; rm -rf /",
+]
+
+
+@pytest.mark.parametrize("profile", ["000123456789:AWS-DevSecOps", "111111111111:Admin_Role", "222222222222:a+b=c,d.e@f-g"])
+def test_apply_roles_accepts_account_id_and_role(profile):
+    ran: list[str] = []
+    res = AwsSsoExtension().handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": profile})
+    assert res.ok and profile in ran[0]
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        "EdSaraiva(AdministradorAWS-AMAZON):AWS-DevSecOps",  # formato antigo (nome da conta)
+        "123:Admin",  # id sem zero-preenchimento
+        "1234567890123:Admin",
+        "111111111111:",
+        "111111111111:Ad min",
+        "111111111111:Admin$(id)",
+        "111111111111:Admin\n222222222222:Dev",
+        "111111111111/Admin",
+        "",
+    ],
+)
+def test_apply_roles_rejects_anything_but_account_id_and_role(profile):
+    ran: list[str] = []
+    with pytest.raises(base.ExtensionError):
+        AwsSsoExtension().handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": profile})
+    assert ran == []
+
+
+def test_card_shows_readable_account_names_next_to_the_profile_value():
+    st = _status(
+        {
+            "server": True, "logged_in": True, "roles": 2,
+            "role_names": ["000123456789:AWS-DevSecOps", "222222222222:Dev"],
+            "role_labels": {"000123456789:AWS-DevSecOps": "EdSaraiva(AdministradorAWS-AMAZON)", "222222222222:Dev": ""},
+        }
+    )
+    text = " ".join(st.card.messages)
+    assert "000123456789:AWS-DevSecOps (EdSaraiva(AdministradorAWS-AMAZON))" in text
+    assert "222222222222:Dev" in text and "222222222222:Dev (" not in text
+
+
+def test_card_shows_the_account_name_of_the_selected_role():
+    st = _status(
+        {
+            "server": True, "logged_in": True, "profile": "000123456789:Admin", "loaded": True,
+            "profile_label": "RedaçãoNota1000",
+        }
+    )
+    assert ("Papel", "000123456789:Admin") in st.card.rows
+    assert ("Conta", "RedaçãoNota1000") in st.card.rows
+
+
+def test_card_html_escapes_account_names():
+    from app.extensions import ui
+
+    st = _status(
+        {
+            "server": True, "logged_in": True, "roles": 1, "role_names": ["111111111111:Admin"],
+            "role_labels": {"111111111111:Admin": "<script>alert(1)</script>"},
+        }
+    )
+    html = ui.render_cards_document(
+        "o", [ui.CardView("aws-sso", "AWS SSO", st.state, st.card, (), "")], lambda e, a: ""
+    )
+    assert "<script>alert(1)</script>" not in html and "&lt;script&gt;" in html
+
+
+def test_supervisor_publishes_account_names_as_labels_only(sidecar):
+    _, s, state, tmp = sidecar
+    rows = [
+        ("000123456789:AWS-DevSecOps", "EdSaraiva(AdministradorAWS-AMAZON)"),
+        ("111111111111:AWS-CloudAdmin", "RedaçãoNota1000"),
+        ("222222222222:Dev", 'Produção (Cliente, A) "x"'),
+    ]
+    import csv as _csv
+    import io as _io
+
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    for r in rows:
+        w.writerow(r)
+    (tmp / "roles.csv").write_text("Profile,AccountName\n" + buf.getvalue(), encoding="utf-8")
+    s.tick()
+    (state / "login_ok").touch()
+    s.tick()
+    st = _status_file(state)
+    assert st["role_names"] == [p for p, _ in rows]
+    assert st["role_labels"] == dict(rows)
+    assert "list --csv Profile AccountName" in _calls(tmp)
+
+    (state / "req/profile").write_text("000123456789:AWS-DevSecOps")
+    s.tick()
+    st = _status_file(state)
+    assert st["profile"] == "000123456789:AWS-DevSecOps" and st["loaded"] is True
+    assert st["profile_label"] == "EdSaraiva(AdministradorAWS-AMAZON)"
+    assert "ecs load --profile 000123456789:AWS-DevSecOps --server localhost:4144" in _calls(tmp)
+
+
+def test_supervisor_rejects_old_style_profile_with_account_name(sidecar):
+    _, s, state, tmp = sidecar
+    (tmp / "roles.csv").write_text("Profile,AccountName\n111111111111:Admin,Plain\n222222222222:Dev,Other\n")
+    s.tick()
+    (state / "login_ok").touch()
+    s.tick()
+    (state / "req/profile").write_text("Plain:Admin")
+    s.tick()
+    assert _status_file(state)["profile"] == ""
+    assert not any(c.startswith("ecs load") for c in _calls(tmp))
+
+
+def test_supervisor_tolerates_list_output_without_account_name_column(sidecar):
+    _, s, state, _ = sidecar
+    s.tick()
+    (state / "login_ok").touch()
+    s.tick()
+    st = _status_file(state)
+    assert st["roles"] == 2 and st["role_labels"] == {p: "" for p in st["role_names"]}

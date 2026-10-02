@@ -289,3 +289,24 @@ def test_aws_sso_card_polls_only_while_waiting_on_something(aws_client, sidecar,
     sidecar.status = status
     (view,) = runtime.evaluate(s, OWNER)
     assert view.card.polling is polling
+
+
+def test_card_lists_account_names_and_apply_roles_takes_the_account_id(aws_client, sidecar, login):
+    """Regressão (cluster real): contas com parênteses/acentos no nome davam
+    "Perfil inválido". O valor enviado é `<id>:<papel>`; o nome é rótulo."""
+    client, s = aws_client
+    login(client)
+    profile = "000123456789:AWS-DevSecOps"
+    sidecar.status = {
+        "server": True, "logged_in": True, "roles": 2,
+        "role_names": [profile, "111111111111:AWS-CloudAdmin"],
+        "role_labels": {profile: "EdSaraiva(AdministradorAWS-AMAZON)", "111111111111:AWS-CloudAdmin": "RedaçãoNota1000"},
+    }
+    page = client.get(f"{URL}/extensions/cards").text
+    assert "EdSaraiva(AdministradorAWS-AMAZON)" in page and "RedaçãoNota1000" in page
+
+    assert runtime.run_action(s, OWNER, "aws-sso", "apply_roles", {"profile": profile}).ok
+    assert profile in " ".join(sidecar.scripts)
+    assert not runtime.run_action(
+        s, OWNER, "aws-sso", "apply_roles", {"profile": "EdSaraiva(AdministradorAWS-AMAZON):AWS-DevSecOps"}
+    ).ok

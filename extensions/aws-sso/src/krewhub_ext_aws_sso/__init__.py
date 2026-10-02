@@ -56,7 +56,8 @@ LOGIN_URL_STALE_SECONDS = 15 * 60
 
 _START_URL_RE = r"https://[A-Za-z0-9.-]+\.(awsapps\.com|amazonaws\.com)(/[^\s]*)?"
 _REGION_RE = r"[a-z]{2}(-[a-z]+)+-\d"
-_PROFILE_RE = re.compile(r"^[A-Za-z0-9:_.@=,+/-]{1,128}$")
+PROFILE_FORMAT = "{{ .AccountIdPad }}:{{ .RoleName }}"
+_PROFILE_RE = re.compile(r"^\d{12}:[A-Za-z0-9_+=,.@-]{1,64}$")
 _URL_IN_LOG = re.compile(r"https://[^\s\"'<>]+")
 _CODE_IN_LOG = re.compile(r"(?:user_code=|[Cc]ode[: ]+)([A-Z0-9]{4}-[A-Z0-9]{4})")
 
@@ -65,7 +66,14 @@ def render_config(config: Mapping[str, Any]) -> str:
     """`config.yaml` do aws-sso-cli. `AuthWorkflow` fica no nível global
     (dentro de `SSOConfig` o aws-sso ignora a chave e cai no PKCE, que
     exige um navegador na máquina do dev); `UrlAction: print` imprime a
-    URL em vez de abrir um navegador inexistente."""
+    URL em vez de abrir um navegador inexistente.
+
+    `ProfileFormat` fixa o nome do perfil como `<id da conta com 12
+    dígitos>:<papel>`. O default do aws-sso-cli usa o NOME da conta, que
+    pode ter parênteses, acentos e o que mais o admin da organização
+    digitou; o id (`AccountIdPad`, zero-preenchido) e o
+    nome do papel IAM (`[\\w+=,.@-]`, até 64) têm alfabeto fechado, então o
+    perfil é validável por regex estrita e seguro de passar adiante."""
     q = json.dumps
     return (
         "SSOConfig:\n"
@@ -77,6 +85,7 @@ def render_config(config: Mapping[str, Any]) -> str:
         "SecureStore: json\n"
         "UrlAction: print\n"
         "AuthWorkflow: device_code\n"
+        f"ProfileFormat: {q(PROFILE_FORMAT)}\n"
     )
 
 
@@ -213,6 +222,8 @@ class AwsSsoExtension(Extension):
         rows: list[tuple[str, str]] = []
         if profile:
             rows.append(("Papel", profile))
+            if st.get("profile_label"):
+                rows.append(("Conta", str(st["profile_label"])))
         if st.get("roles"):
             rows.append(("Papéis disponíveis", str(st["roles"])))
         roles = st.get("role_names") or []
@@ -236,7 +247,8 @@ class AwsSsoExtension(Extension):
         elif not profile:
             summary = "Login feito. Escolha o papel que o ambiente deve assumir."
             if roles:
-                messages.append("Perfis: " + ", ".join(str(r) for r in roles[:20]))
+                labels = st.get("role_labels") if isinstance(st.get("role_labels"), dict) else {}
+                messages.append("Perfis: " + "; ".join(_describe_role(r, labels) for r in roles[:20]))
             # com um único papel o supervisor o seleciona sozinho
             polling = int(st.get("roles") or 0) == 1
         else:
@@ -302,6 +314,13 @@ class AwsSsoExtension(Extension):
             code=code,
         )
         return ActionResult(message="Login iniciado.", card=card)
+
+
+def _describe_role(profile: Any, labels: Mapping[str, Any]) -> str:
+    """`id:Papel (Nome da conta)`: o valor a digitar é só o `id:Papel`; o
+    nome da conta é rótulo e aparece apenas escapado pelo renderer."""
+    name = str(labels.get(profile) or "").strip()
+    return f"{profile} ({name})" if name else str(profile)
 
 
 def _first_url(log: str) -> str:

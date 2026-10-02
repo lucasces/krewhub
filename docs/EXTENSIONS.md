@@ -196,6 +196,14 @@ start URL, required), `sso_region` (required) and `default_region`
   with a single role it is selected automatically, otherwise the
   developer picks one with `apply_roles`. `refresh_roles` re-reads the
   available roles and `reload_creds` refreshes the credentials.
+- Roles are identified by `<12-digit account id>:<role name>` (for
+  example `000123456789:AdministratorAccess`). The generated
+  `config.yaml` sets `ProfileFormat` to `{{ .AccountIdPad }}:{{ .RoleName }}`
+  because the `aws-sso-cli` default embeds the account name, which can
+  contain parentheses, accents and other characters. `apply_roles`
+  accepts only that format. The card shows each account name next to its
+  profile as a label, so the developer still sees which account is which,
+  but the name is never used as a value.
 
 **Image.** The sidecar image is built from `extensions/aws-sso/` with
 `aws-sso-cli` pinned by version and SHA-256, runs as a non-root user and

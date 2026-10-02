@@ -5,7 +5,9 @@ Sobe o `aws-sso ecs server`, mantém as credenciais carregadas e publica o
 estado em `/state/status.json`. É o ÚNICO escritor desse arquivo; o
 KrewHub (via `kubectl exec`-equivalente) só deixa pedidos em `/state/req/`:
 
-- `req/profile`  -- perfil a assumir (`aws-sso list` -> coluna Profile)
+- `req/profile`  -- perfil a assumir (`aws-sso list` -> coluna Profile,
+  sempre `<id da conta, 12 dígitos>:<papel>` por causa do `ProfileFormat`
+  gerado pela extensão)
 - `req/refresh`  -- recarregar a lista de contas/papéis
 - `req/reload`   -- recarregar as credenciais do papel atual
 
@@ -32,7 +34,7 @@ POLL_SECONDS = float(os.environ.get("AWS_SSO_POLL", "2"))
 RELOAD_SECONDS = float(os.environ.get("AWS_SSO_RELOAD", "1200"))
 CMD_TIMEOUT = 60
 
-PROFILE_RE = re.compile(r"^[A-Za-z0-9:_.@=,+/-]{1,128}$")
+PROFILE_RE = re.compile(r"^\d{12}:[A-Za-z0-9_+=,.@-]{1,64}$")
 
 
 def log(msg: str) -> None:
@@ -62,6 +64,7 @@ class Supervisor:
         self.loaded = False
         self.last_load = 0.0
         self.roles: list[str] = []
+        self.labels: dict[str, str] = {}
         self.roles_fetched = False
         self.error = ""
         self.next_server_try = 0.0
@@ -94,15 +97,17 @@ class Supervisor:
 
     def refresh_roles(self) -> None:
         run(["cache"])
-        res = run(["list", "--csv", "Profile"])
+        res = run(["list", "--csv", "Profile", "AccountName"])
         if res.returncode != 0:
             log(f"list falhou: rc={res.returncode}")
             (STATE / "login_ok").unlink(missing_ok=True)
-            self.roles, self.roles_fetched, self.loaded = [], False, False
+            self.roles, self.labels, self.roles_fetched, self.loaded = [], {}, False, False
             self.error = "Sessão SSO expirada ou inválida; faça login de novo."
             return
-        rows = [r for r in csv.reader(io.StringIO(res.stdout)) if r]
-        self.roles = [r[0] for r in rows if r[0] != "Profile"]
+        rows = [r for r in csv.reader(io.StringIO(res.stdout)) if r and r[0] != "Profile"]
+        # o nome da conta é só rótulo de exibição: nunca vira argumento de comando
+        self.labels = {r[0]: (r[1] if len(r) > 1 else "") for r in rows}
+        self.roles = [r[0] for r in rows]
         self.roles_fetched = True
         self.error = ""
 
@@ -125,7 +130,7 @@ class Supervisor:
         logged_in = (STATE / "login_ok").exists()
 
         if not logged_in:
-            self.roles, self.roles_fetched, self.loaded = [], False, False
+            self.roles, self.labels, self.roles_fetched, self.loaded = [], {}, False, False
             take(STATE / "req" / "refresh")
             take(STATE / "req" / "reload")
             take(STATE / "req" / "profile")
@@ -159,6 +164,8 @@ class Supervisor:
             "loaded": self.loaded and server_up,
             "roles": len(self.roles),
             "role_names": self.roles[:50],
+            "role_labels": {p: self.labels.get(p, "") for p in self.roles[:50]},
+            "profile_label": self.labels.get(self.profile, ""),
             "error": self.error,
         }
         tmp = STATE / "status.json.tmp"
