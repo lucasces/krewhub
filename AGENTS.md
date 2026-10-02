@@ -76,6 +76,12 @@ generic/empty).
   arg. Plugins must not depend on `krewhub`, and the dataclasses in
   `app/extensions/base.py` are a public API: changing them needs an
   `API_VERSION` bump.
+- Kiro Crew (inside `kirocrew`) discovers skills by scanning
+  `~/.kiro/skills/<name>/SKILL.md` (and `~/.kiro/crew/skills/`); it follows
+  the ConfigMap `..data` symlinks, which is why extension skills are plain
+  ConfigMap mounts. A pod `env` `PATH` replaces the image's `PATH`
+  entirely, so `app/extensions/contributions.py` builds it from a fixed
+  Debian default (`DEFAULT_MAIN_PATH`) plus the extensions' tool dirs.
 
 - The CHP API uses the header `Authorization: token <value>` (not
   `Bearer`) — `app/chp_client.py`. `Bearer` is the format for KrewHub's

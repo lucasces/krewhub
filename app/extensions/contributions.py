@@ -94,7 +94,7 @@ def _tools_parts(ext_id: str, tools: ToolsSpec) -> tuple[dict, dict, dict, str]:
         },
         "resources": {
             "requests": {"cpu": "10m", "memory": "32Mi"},
-            "limits": {"memory": "256Mi"},
+            "limits": {"memory": "512Mi"},
         },
     }
     mount_path = tools_mount_path(ext_id)

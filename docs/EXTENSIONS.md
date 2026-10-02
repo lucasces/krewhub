@@ -21,8 +21,9 @@ and has two parts.
 - `actions` — buttons on the card, each with `requires` (condition names
   that must be true for the button to be enabled) and optional `params`.
 - `pod_contribution(ctx)` — a `PodContribution` merged into the Pod:
-  sidecar containers, volumes, mounts, env for the main container, and
-  files rendered into a ConfigMap.
+  sidecar containers, volumes, mounts, env for the main container, files
+  rendered into a ConfigMap, [binaries](#tools-and-skills-in-the-main-container)
+  exposed in the main container and agent skills.
 
 **Imperative (all optional).**
 
@@ -149,6 +150,55 @@ teardown. Because the Pod spec is immutable, KrewHub stores a hash of the
 spec — including the content of those files — in an annotation and
 recreates the Pod when it changes.
 
+## Tools and skills in the main container
+
+The main container (`kirocrew`) has a read-only root filesystem, runs as
+a non-root user and drops all capabilities, so an extension cannot install
+anything into it at run time. Two contribution types cover what a
+workspace needs from an extension beyond environment variables.
+
+**`tools`: binaries on the main container's `PATH`.** A `ToolsSpec`
+(`image`, `command`, optional `bin_dir` and `size_limit`) makes KrewHub
+add:
+
+1. an `emptyDir` volume `<id>-tools`;
+2. an init container `<id>-tools` that runs `command` in `image` with the
+   volume writable at `/tools`; it has the same hardening as the main
+   container (non-root, read-only root filesystem, no capabilities);
+3. the same volume, read-only, at `/opt/krewhub-ext/<id>` in the main
+   container, with `/opt/krewhub-ext/<id>/<bin_dir>` prepended to its
+   `PATH`.
+
+`command` copies the files into `/tools` and must leave `<bin_dir>/` filled
+in. The result is a per-Pod copy that disappears with the Pod; changing
+`image` or `command` changes the spec hash and recreates the Pod.
+
+Alternatives considered:
+
+- *A sidecar that populates a shared volume.* Sidecars and the main
+  container start in parallel, so the binary may not exist when the main
+  container starts. An init container finishes first.
+- *A derived `kirocrew` image.* It would tie every cluster to one
+  extension set and break the administrator's choice of `kirocrew` image
+  (`KREWHUB_KIROCREW_IMAGE`).
+
+An environment variable replaces the image's own, and Kubernetes does not
+expand `$(PATH)` with a value that comes from the image, so the `PATH`
+KrewHub sets is the tool directories followed by the Debian default
+`/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin`. An
+extension cannot define `PATH` itself when it contributes tools; the
+administrator's overlay can still change it.
+
+**`skills`: instructions for the agent.** The agent in `kirocrew` (Kiro
+Crew) discovers skills by scanning `~/.kiro/skills/<name>/SKILL.md` at
+every invocation and indexes each one by its `name` and `description`
+frontmatter. `skills={"<name>": "<SKILL.md content>"}` mounts each skill
+read-only at that path from the ConfigMap `krewhub-ext-files-<slug>`, so
+it appears when the extension is enabled and disappears when it is not,
+with no configuration by the developer. `<name>` must be the extension id
+or start with `<id>-`, and the content must start with a frontmatter block
+containing `name: <name>`. A skill's content is part of the spec hash.
+
 ## Writing an extension
 
 - Keep the package free of a `krewhub` dependency; import only from
@@ -205,9 +255,20 @@ start URL, required), `sso_region` (required) and `default_region`
   profile as a label, so the developer still sees which account is which,
   but the name is never used as a value.
 
-**Image.** The sidecar image is built from `extensions/aws-sso/` with
-`aws-sso-cli` pinned by version and SHA-256, runs as a non-root user and
-drops all capabilities. The release workflow publishes it as
+- The main container gets the [AWS CLI v2](https://docs.aws.amazon.com/cli/)
+  through the `tools` contribution (`aws` on `PATH`; the init container
+  copies it out of the extension image) and the skill `aws-sso`. The skill
+  tells the agent that credentials come from the container-credentials
+  endpoint with no profiles, to confirm the active role with
+  `aws sts get-caller-identity`, to ask before changing resources, and to
+  send the developer to the lobby card when credentials are missing or
+  expired. One role is active at a time, so the skill does not list roles.
+
+**Image.** The extension image is built from `extensions/aws-sso/` with
+`aws-sso-cli` and the AWS CLI v2 pinned by version and SHA-256 (the CLI per
+architecture), runs as a non-root user and drops all capabilities. Pods use
+it both for the sidecar and for the `aws-sso-tools` init container. The
+release workflow publishes it as
 `ghcr.io/<owner>/krewhub-ext-aws-sso`. Set the image used by Pods with
 the environment variable `KREWHUB_EXT_AWS_SSO_IMAGE` (Helm:
 `krewhubCentral.extensions.env`).
@@ -224,6 +285,11 @@ krewhubCentral:
 
 ## Known limitations
 
+- **The tool directories are prepended to a fixed default `PATH`.** If a
+  `kirocrew` image changes its own `PATH`, the one KrewHub sets replaces
+  it; adjust it with the Pod overlay.
+- **Tools are copied per Pod.** The AWS CLI occupies about 275 MB of node
+  ephemeral storage per workspace and is copied at every Pod start.
 - **The `aws-sso` device-code login is not validated on a real cluster.**
   The code assumes `aws-sso login --url-action print` runs through the
   same pseudo-terminal driver as the Kiro login and prints the

@@ -1,6 +1,10 @@
 """Extensão AWS SSO: credenciais temporárias do IAM Identity Center no Pod
 do dev, via `aws-sso-cli` rodando como sidecar.
 
+O `kirocrew` também recebe o `aws` CLI v2 (initContainer + volume somente
+leitura, ver `ToolsSpec`) e a skill `aws-sso` em `~/.kiro/skills`, pra o agente
+saber usar as credenciais sem configuração manual.
+
 Fluxo: o sidecar `aws-sso` sobe o `aws-sso ecs server` em 127.0.0.1:4144
 (protegido por bearer token gerado pelo KrewHub). O container `kirocrew`
 recebe `AWS_CONTAINER_CREDENTIALS_FULL_URI` + `AWS_CONTAINER_AUTHORIZATION_TOKEN`,
@@ -35,10 +39,14 @@ from app.extensions.base import (
     Link,
     PodContribution,
     Status,
+    TOOLS_POPULATE_DIR,
+    ToolsSpec,
     derive_state,
     files_volume_name,
     secret_env,
 )
+
+from krewhub_ext_aws_sso.skill import SKILL_MD, SKILL_NAME
 
 logger = logging.getLogger("krewhub.ext.aws-sso")
 
@@ -46,6 +54,9 @@ EXT_ID = "aws-sso"
 SIDECAR = "aws-sso"
 PORT = 4144
 STATE_DIR = "/state"
+#: AWS CLI v2 embutido na imagem do sidecar; o initContainer `aws-sso-tools`
+#: copia isto pro volume que o `kirocrew` monta (ver `ToolsSpec`)
+TOOLS_SOURCE_DIR = "/opt/krewhub-tools"
 CONFIG_DIR = "/etc/aws-sso"
 DEFAULT_IMAGE = "ghcr.io/lucasces/krewhub-ext-aws-sso:0.1.0"
 IMAGE_ENV = "KREWHUB_EXT_AWS_SSO_IMAGE"
@@ -193,6 +204,11 @@ class AwsSsoExtension(Extension):
                 {"name": "AWS_DEFAULT_REGION", "value": region},
             ],
             files={"config.yaml": render_config(cfg)},
+            tools=ToolsSpec(
+                image=image,
+                command=("sh", "-c", f"cp -a --no-preserve=ownership {TOOLS_SOURCE_DIR}/. {TOOLS_POPULATE_DIR}/"),
+            ),
+            skills={SKILL_NAME: SKILL_MD},
         )
 
     # --- status ----------------------------------------------------------

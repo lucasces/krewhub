@@ -132,6 +132,71 @@ def test_pod_main_env_points_sdk_at_the_sidecar_with_the_bearer(monkeypatch):
     assert "value" not in env["KREWHUB_AWS_SSO_TOKEN"]
 
 
+def test_pod_copies_the_aws_cli_into_kirocrew_through_an_init_container(monkeypatch):
+    pod = _pod(monkeypatch, "registry.test/krewhub-ext-aws-sso:9")
+    spec = pod["spec"]
+    (init,) = spec["initContainers"]
+    # mesma imagem do sidecar: um pull só, uma versão só pra fixar
+    assert init["name"] == "aws-sso-tools"
+    assert init["image"] == "registry.test/krewhub-ext-aws-sso:9"
+    assert init["command"][:2] == ["sh", "-c"]
+    assert "/opt/krewhub-tools/. /tools/" in init["command"][2]
+    assert init["securityContext"]["readOnlyRootFilesystem"] is True
+    main = spec["containers"][0]
+    mount = next(m for m in main["volumeMounts"] if m["name"] == "aws-sso-tools")
+    assert mount == {"name": "aws-sso-tools", "mountPath": "/opt/krewhub-ext/aws-sso", "readOnly": True}
+    path = next(e["value"] for e in main["env"] if e["name"] == "PATH")
+    assert path.split(":")[0] == "/opt/krewhub-ext/aws-sso/bin"
+
+
+def test_pod_mounts_the_agent_skill_where_kiro_discovers_it(monkeypatch):
+    pod = _pod(monkeypatch)
+    main = pod["spec"]["containers"][0]
+    mount = next(m for m in main["volumeMounts"] if m["name"] == "aws-sso-skill")
+    assert mount == {"name": "aws-sso-skill", "mountPath": "/home/kirocrew/.kiro/skills/aws-sso", "readOnly": True}
+    vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "aws-sso-skill")
+    assert vol["configMap"]["items"] == [{"key": "aws-sso.skills.aws-sso.md", "path": "SKILL.md"}]
+    contrib = AwsSsoExtension().pod_contribution(base.BuildContext("d@t", "dev-test-local", "ns", CFG, None))
+    assert base.files_volume_name("aws-sso") in {v["name"] for v in pod["spec"]["volumes"]}
+    assert set(contrib.skills) == {"aws-sso"}
+
+
+def test_skill_has_kiro_frontmatter_and_the_guidance_the_agent_needs():
+    from krewhub_ext_aws_sso.skill import SKILL_MD, SKILL_NAME
+
+    head, _, body = SKILL_MD[4:].partition("\n---\n")
+    fields = dict(line.split(": ", 1) for line in head.splitlines())
+    assert SKILL_MD.startswith("---\n")
+    assert fields["name"] == SKILL_NAME == "aws-sso"
+    assert len(fields["description"]) > 80
+    for needle in (
+        "aws sts get-caller-identity",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "/opt/krewhub-ext/aws-sso/bin/aws",
+        "aws configure",
+        "aws sso login",
+        "--profile",
+        "boto3",
+        "KrewHub",
+    ):
+        assert needle in body, needle
+    # nada de credencial de exemplo no texto
+    assert "AKIA" not in SKILL_MD and "ASIA" not in SKILL_MD
+
+
+def test_dockerfile_ships_the_pinned_aws_cli_where_the_init_container_copies_it_from():
+    import re
+
+    from krewhub_ext_aws_sso import TOOLS_SOURCE_DIR
+
+    dockerfile = (Path(__file__).resolve().parent.parent / "extensions" / "aws-sso" / "Dockerfile").read_text()
+    assert f"COPY --from=awscli /out {TOOLS_SOURCE_DIR}" in dockerfile
+    assert "ln -s ../aws-cli/aws /out/bin/aws" in dockerfile
+    for arch in ("AMD64", "ARM64"):
+        assert re.search(rf"ARG AWSCLI_SHA256_{arch}=[0-9a-f]{{64}}\b", dockerfile)
+    assert "sha256sum -c" in dockerfile
+
+
 def test_pod_spec_hash_changes_with_config(monkeypatch):
     ext = AwsSsoExtension()
 
