@@ -60,20 +60,45 @@ def find_dev_pod(
     return running[0].metadata.name
 
 
+EXEC_TIMEOUT = 60
+
+
 def exec_command(
-    c: Clients, pod_name: str, namespace: str, command: list[str], *, container: str = MAIN_CONTAINER
+    c: Clients,
+    pod_name: str,
+    namespace: str,
+    command: list[str],
+    *,
+    container: str | None = MAIN_CONTAINER,
+    timeout: float = EXEC_TIMEOUT,
 ) -> str:
-    return stream(
-        c.core.connect_get_namespaced_pod_exec,
-        pod_name,
-        namespace,
-        container=container,
-        command=command,
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
+    """Roda `command` no container e devolve stdout+stderr EXATAMENTE como
+    saíram.
+
+    Não use o retorno "pré-carregado" de `stream(...)`: o
+    `connect_get_namespaced_pod_exec` tem `response_type='str'`, então o
+    `ApiClient.deserialize` faz `json.loads` na saída e, se ela inteira for
+    JSON válido (objeto, lista, `true`, `123`...), devolve `str(obj)` --
+    a repr do Python (`True`, `None`, aspas simples). Com
+    `_preload_content=False` o `stream` entrega o `WSClient` cru e a
+    desserialização nunca acontece. `container=None` usa o container
+    default do Pod."""
+    kwargs: dict = {
+        "command": command,
+        "stderr": True,
+        "stdin": False,
+        "stdout": True,
+        "tty": False,
+        "_preload_content": False,
+    }
+    if container:
+        kwargs["container"] = container
+    ws = stream(c.core.connect_get_namespaced_pod_exec, pod_name, namespace, **kwargs)
+    try:
+        ws.run_forever(timeout=timeout)
+        return ws.read_all()
+    finally:
+        ws.close()
 
 
 def exec_sh(

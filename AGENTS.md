@@ -139,6 +139,15 @@ generic/empty).
   `kubectl exec`, via POST/SPDY). A `ClusterRole` with only `create` on
   `pods/exec` fails with a 403 "cannot **get** resource pods/exec" —
   it needs `get` too.
+- Exec output must not go through the client's preloaded response:
+  `connect_get_namespaced_pod_exec` has `response_type='str'`, and
+  `ApiClient.deserialize` runs `json.loads` on the stdout first, so any
+  output that is entirely valid JSON (an object, a list, `true`, `123`)
+  comes back as `str(obj)` — the Python repr (`True`, `None`, single
+  quotes) — and the trailing newline is lost. Always go through
+  `pod_exec.exec_command`/`exec_sh`, which request the raw `WSClient`
+  (`_preload_content=False`); never call `kubernetes.stream.stream`
+  directly for output you will parse.
 - Testing `*.kiro.internal` via local port-forward: always point at the
   CHP Service (`svc/configurable-http-proxy`, the public port from
   `--host-routing`), never directly at an individual app's Service
