@@ -28,7 +28,7 @@ import secrets as _secrets
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-API_VERSION = "1.1"
+API_VERSION = "1.2"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -94,6 +94,47 @@ class ActionSpec:
             raise ValueError(f"ActionSpec.id inválido: {self.id!r}")
 
 
+#: onde o initContainer das ferramentas encontra o volume (gravável) pra copiar
+#: os binários -- ver `ToolsSpec`
+TOOLS_POPULATE_DIR = "/tools"
+#: raiz, no `kirocrew`, dos volumes de ferramentas (`<raiz>/<id da extensão>`)
+TOOLS_MOUNT_ROOT = "/opt/krewhub-ext"
+#: pasta de skills do Kiro Crew (lida a cada invocação do agente)
+SKILLS_ROOT = "/home/kirocrew/.kiro/skills"
+
+
+@dataclass(frozen=True)
+class ToolsSpec:
+    """Binários que a extensão disponibiliza no container `kirocrew`.
+
+    O `kirocrew` roda com filesystem raiz somente leitura, sem root e sem
+    capabilities, então não dá pra instalar nada nele em runtime. O core
+    monta o caminho inteiro a partir disto:
+
+    1. um volume `emptyDir` `<id>-tools`;
+    2. um initContainer `<id>-tools` (mesmo endurecimento do `kirocrew`:
+       não-root, raiz somente leitura, sem capabilities) que roda
+       `image`+`command` com o volume gravável em `TOOLS_POPULATE_DIR`;
+    3. o mesmo volume, SOMENTE LEITURA, em `<TOOLS_MOUNT_ROOT>/<id>` no
+       `kirocrew`, e `<TOOLS_MOUNT_ROOT>/<id>/<bin_dir>` no começo do
+       `PATH` dele.
+
+    O initContainer termina antes de qualquer container do Pod subir, então
+    o binário já existe quando o `kirocrew` inicia (um sidecar não dá essa
+    garantia: sidecars e container principal sobem em paralelo).
+
+    - `command` copia os arquivos pra `TOOLS_POPULATE_DIR` (ex.:
+      `("sh", "-c", "cp -a --no-preserve=ownership /opt/x/. /tools/")`);
+      precisa terminar com `<bin_dir>/` preenchido.
+    - `size_limit`: teto do emptyDir (cópia por Pod, descartada com ele).
+    """
+
+    image: str
+    command: tuple[str, ...]
+    bin_dir: str = "bin"
+    size_limit: str = "512Mi"
+
+
 @dataclass
 class PodContribution:
     """O que a extensão acrescenta ao Pod do dev.
@@ -108,6 +149,12 @@ class PodContribution:
       `krewhub-ext-files-<slug>` e um volume `<id>-files` (somente
       leitura) com esses arquivos; a extensão monta esse volume nos seus
       containers (`files_volume_name(ext_id)`).
+    - `tools`: binários expostos no `kirocrew` (ver `ToolsSpec`).
+    - `skills`: `{nome: conteúdo do SKILL.md}` -- instruções pro agente do
+      `kirocrew`. O core as monta (somente leitura) em
+      `~/.kiro/skills/<nome>/SKILL.md`, onde o Kiro Crew as descobre sozinho;
+      `<nome>` precisa ser o id da extensão ou começar com `<id>-`, e o
+      frontmatter precisa trazer `name: <nome>`.
     - `annotations`: anotações extras do Pod.
     """
 
@@ -117,11 +164,17 @@ class PodContribution:
     main_env: list[dict] = field(default_factory=list)
     main_volume_mounts: list[dict] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
+    tools: ToolsSpec | None = None
+    skills: dict[str, str] = field(default_factory=dict)
     annotations: dict[str, str] = field(default_factory=dict)
 
 
 def files_volume_name(ext_id: str) -> str:
     return f"{ext_id}-files"
+
+
+def tools_mount_path(ext_id: str) -> str:
+    return f"{TOOLS_MOUNT_ROOT}/{ext_id}"
 
 
 def secret_name(slug: str) -> str:
@@ -399,11 +452,16 @@ __all__ = [
     "FieldSpec",
     "Link",
     "PodContribution",
+    "SKILLS_ROOT",
     "Status",
+    "TOOLS_MOUNT_ROOT",
+    "TOOLS_POPULATE_DIR",
+    "ToolsSpec",
     "derive_state",
     "files_volume_name",
     "generate_secret",
     "secret_env",
     "secret_key",
     "secret_name",
+    "tools_mount_path",
 ]

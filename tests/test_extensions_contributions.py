@@ -7,8 +7,9 @@ import copy
 import pytest
 
 from app import k8s_templates as tpl
-from app.extensions.base import PodContribution
+from app.extensions.base import PodContribution, ToolsSpec
 from app.extensions.contributions import (
+    DEFAULT_MAIN_PATH,
     ContributionError,
     collect_files,
     files_configmap_name,
@@ -140,3 +141,142 @@ def test_failed_merge_does_not_leak_into_other_calls(settings):
     before = copy.deepcopy(contrib)
     _build(settings, ("demo", contrib))
     assert contrib == before
+
+
+# --- tools: binários no kirocrew via initContainer + emptyDir -----------------
+
+
+def _tools(**kw):
+    return ToolsSpec(image="example/tools:1", command=("sh", "-c", "cp -a /x/. /tools/"), **kw)
+
+
+def test_tools_expand_into_init_container_volume_mount_and_path(settings):
+    pod = _build(settings, ("demo", PodContribution(tools=_tools())))
+    spec = pod["spec"]
+    init = next(c for c in spec["initContainers"] if c["name"] == "demo-tools")
+    assert init["image"] == "example/tools:1"
+    assert init["command"] == ["sh", "-c", "cp -a /x/. /tools/"]
+    assert init["volumeMounts"] == [{"name": "demo-tools", "mountPath": "/tools"}]
+    sc = init["securityContext"]
+    assert sc["runAsNonRoot"] and sc["readOnlyRootFilesystem"] and not sc["allowPrivilegeEscalation"]
+    assert sc["capabilities"] == {"drop": ["ALL"]}
+    assert {"name": "demo-tools", "emptyDir": {"sizeLimit": "512Mi"}} in spec["volumes"]
+    main = spec["containers"][0]
+    assert {"name": "demo-tools", "mountPath": "/opt/krewhub-ext/demo", "readOnly": True} in main["volumeMounts"]
+    path = next(e["value"] for e in main["env"] if e["name"] == "PATH")
+    assert path.startswith("/opt/krewhub-ext/demo/bin:")
+    assert path.endswith(DEFAULT_MAIN_PATH)
+    # o PATH original da imagem continua inteiro no fim
+    assert "/usr/local/bin" in path.split(":") and "/usr/bin" in path.split(":")
+
+
+def test_tools_of_two_extensions_share_one_path_entry(settings):
+    pod = _build(
+        settings,
+        ("aaa", PodContribution(tools=_tools())),
+        ("bbb", PodContribution(tools=_tools(bin_dir="sbin"))),
+    )
+    envs = [e for e in pod["spec"]["containers"][0]["env"] if e["name"] == "PATH"]
+    assert len(envs) == 1
+    assert envs[0]["value"].startswith("/opt/krewhub-ext/aaa/bin:/opt/krewhub-ext/bbb/sbin:")
+    assert [c["name"] for c in pod["spec"]["initContainers"]] == ["aaa-tools", "bbb-tools"]
+
+
+def test_no_tools_means_no_path_override_and_no_init_container(settings):
+    pod = _build(settings, ("demo", PodContribution(containers=[_side()])))
+    assert "initContainers" not in pod["spec"]
+    assert all(e["name"] != "PATH" for e in pod["spec"]["containers"][0]["env"])
+
+
+def test_tools_change_the_spec_hash(settings):
+    ann = tpl.SPEC_HASH_ANNOTATION
+
+    def h(image):
+        t = ToolsSpec(image=image, command=("true",))
+        return _build(settings, ("demo", PodContribution(tools=t)))["metadata"]["annotations"][ann]
+
+    assert h("example/tools:1") != h("example/tools:2")
+
+
+@pytest.mark.parametrize(
+    "contrib, fragment",
+    [
+        (PodContribution(tools=ToolsSpec(image="i", command=())), "command vazio"),
+        (PodContribution(tools=ToolsSpec(image="i", command=("true",), bin_dir="../x")), "bin_dir"),
+        (PodContribution(tools=ToolsSpec(image="i", command=("true",), bin_dir="/abs")), "bin_dir"),
+        (PodContribution(init_containers=[_side("demo-tools")], tools=_tools()), "duplicado"),
+        (
+            PodContribution(main_env=[{"name": "PATH", "value": "/x"}], tools=_tools()),
+            "PATH",
+        ),
+    ],
+)
+def test_bad_tools_are_rejected(settings, contrib, fragment):
+    with pytest.raises(ContributionError, match=fragment):
+        _build(settings, ("demo", contrib))
+
+
+# --- skills: SKILL.md descoberto pelo Kiro Crew -------------------------------
+
+SKILL = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n"
+
+
+def test_skill_is_mounted_read_only_under_kiro_skills(settings):
+    contrib = PodContribution(skills={"demo": SKILL})
+    pod = _build(settings, ("demo", contrib))
+    vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "demo-skill")
+    assert vol["configMap"] == {
+        "name": "krewhub-ext-files-alice",
+        "items": [{"key": "demo.skills.demo.md", "path": "SKILL.md"}],
+    }
+    main = pod["spec"]["containers"][0]
+    assert {
+        "name": "demo-skill",
+        "mountPath": "/home/kirocrew/.kiro/skills/demo",
+        "readOnly": True,
+    } in main["volumeMounts"]
+    assert collect_files([("demo", contrib)]) == {"demo.skills.demo.md": SKILL}
+
+
+def test_skill_content_changes_the_spec_hash(settings):
+    ann = tpl.SPEC_HASH_ANNOTATION
+
+    def h(body):
+        c = PodContribution(skills={"demo": SKILL + body})
+        return _build(settings, ("demo", c))["metadata"]["annotations"][ann]
+
+    assert h("a") != h("b")
+
+
+def test_skill_and_files_share_the_configmap_without_clashing(settings):
+    contrib = PodContribution(files={"cfg.yaml": "x"}, skills={"demo-aws": SKILL.replace("name: demo", "name: demo-aws")})
+    data = collect_files([("demo", contrib)])
+    assert data == {
+        "demo.cfg.yaml": "x",
+        "demo.skills.demo-aws.md": SKILL.replace("name: demo", "name: demo-aws"),
+    }
+    pod = _build(settings, ("demo", contrib))
+    names = {v["name"] for v in pod["spec"]["volumes"]}
+    assert {"demo-files", "demo-aws-skill"} <= names
+
+
+@pytest.mark.parametrize(
+    "skills, fragment",
+    [
+        ({"other": "---\nname: other\n---\n"}, "precisa se chamar"),
+        ({"Demo": SKILL}, "precisa se chamar"),
+        ({"demo": "# sem frontmatter\n"}, "frontmatter"),
+        ({"demo": "---\nname: outro\n---\n"}, "frontmatter"),
+        ({"demo": "---\ndescription: x\n---\nname: demo\n"}, "frontmatter"),
+        ({"demo": "---\nname: demo\n"}, "frontmatter"),
+    ],
+)
+def test_bad_skills_are_rejected(settings, skills, fragment):
+    with pytest.raises(ContributionError, match=fragment):
+        _build(settings, ("demo", PodContribution(skills=skills)))
+
+
+def test_skill_file_name_collision_is_rejected(settings):
+    contrib = PodContribution(files={"skills.demo.md": "x"}, skills={"demo": SKILL})
+    with pytest.raises(ContributionError, match="colide"):
+        _build(settings, ("demo", contrib))
