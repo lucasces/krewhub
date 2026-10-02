@@ -1,12 +1,3 @@
-"""Skill do agente (Kiro Crew) que acompanha a extensão: como usar as
-credenciais AWS que o ambiente já recebe. O texto é pro agente, não pro dev
--- por isso em inglês, como as skills nativas do Kiro Crew."""
-
-from __future__ import annotations
-
-SKILL_NAME = "aws-sso"
-
-SKILL_MD = """\
 ---
 name: aws-sso
 description: Use the AWS account and role this environment is already signed in to (AWS IAM Identity Center / SSO) with the `aws` CLI v2, boto3 or any AWS SDK. Use whenever a task touches AWS -- S3, EC2, IAM, CloudWatch, Lambda, ECS, EKS, CloudFormation, Terraform/CDK against AWS, "which account am I in", AWS credentials or permission errors. Covers how to confirm the active role, what not to do (no `aws configure`, no `aws sso login`, no --profile) and what to tell the user when credentials are missing or expired.
@@ -86,4 +77,3 @@ To use a different role or account, the user switches the role in the same
 card. New CLI invocations pick it up; a long-running process (a script, a dev
 server) may keep using the old credentials until it is restarted, so re-run
 `aws sts get-caller-identity` afterwards to confirm.
-"""

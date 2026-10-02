@@ -216,6 +216,74 @@ def test_bad_tools_are_rejected(settings, contrib, fragment):
         _build(settings, ("demo", contrib))
 
 
+# --- skills entregues pela imagem de tools (ToolsSpec.skills) ----------------
+
+
+def _image_skills(*names, **kw):
+    return PodContribution(tools=ToolsSpec(image="example/tools:1", command=("true",), skills=names, **kw))
+
+
+def test_image_skills_are_subpath_mounts_of_the_tools_volume(settings):
+    pod = _build(settings, ("demo", _image_skills("demo", "demo-extra", skills_dir="agent/skills")))
+    spec = pod["spec"]
+    mounts = {m["mountPath"]: m for m in spec["containers"][0]["volumeMounts"]}
+    assert mounts["/home/kirocrew/.kiro/skills/demo"] == {
+        "name": "demo-tools",
+        "mountPath": "/home/kirocrew/.kiro/skills/demo",
+        "subPath": "agent/skills/demo",
+        "readOnly": True,
+    }
+    assert mounts["/home/kirocrew/.kiro/skills/demo-extra"]["subPath"] == "agent/skills/demo-extra"
+    # sem ConfigMap: o conteúdo vem da imagem
+    assert all("configMap" not in v for v in spec["volumes"])
+    assert collect_files([("demo", _image_skills("demo"))]) == {}
+
+
+def test_image_skills_follow_the_image_tag_in_the_spec_hash(settings):
+    ann = tpl.SPEC_HASH_ANNOTATION
+
+    def h(image, *skills):
+        t = ToolsSpec(image=image, command=("true",), skills=skills)
+        return _build(settings, ("demo", PodContribution(tools=t)))["metadata"]["annotations"][ann]
+
+    assert h("example/tools:1", "demo") != h("example/tools:2", "demo")
+    assert h("example/tools:1", "demo") != h("example/tools:1")
+
+
+@pytest.mark.parametrize(
+    "contrib, fragment",
+    [
+        (_image_skills("other"), "skill 'other'"),
+        (_image_skills("Demo"), "skill 'Demo'"),
+        (_image_skills("demo", "demo"), "repetidos"),
+        (_image_skills("demo", skills_dir="../x"), "skills_dir"),
+        (_image_skills("demo", skills_dir="/abs"), "skills_dir"),
+    ],
+)
+def test_bad_image_skills_are_rejected(settings, contrib, fragment):
+    with pytest.raises(ContributionError, match=fragment):
+        _build(settings, ("demo", contrib))
+
+
+def test_image_skill_and_configmap_skill_with_the_same_name_clash(settings):
+    both = PodContribution(
+        tools=ToolsSpec(image="i", command=("true",), skills=("demo",)),
+        skills={"demo": SKILL},
+    )
+    with pytest.raises(ContributionError, match="mountPath"):
+        _build(settings, ("demo", both))
+
+
+def test_image_skill_and_configmap_skill_can_coexist_under_different_names(settings):
+    both = PodContribution(
+        tools=ToolsSpec(image="i", command=("true",), skills=("demo",)),
+        skills={"demo-small": SKILL.replace("name: demo", "name: demo-small")},
+    )
+    pod = _build(settings, ("demo", both))
+    paths = {m["mountPath"] for m in pod["spec"]["containers"][0]["volumeMounts"]}
+    assert {"/home/kirocrew/.kiro/skills/demo", "/home/kirocrew/.kiro/skills/demo-small"} <= paths
+
+
 # --- skills: SKILL.md descoberto pelo Kiro Crew -------------------------------
 
 SKILL = "---\nname: demo\ndescription: Demo skill\n---\n\n# Demo\n"

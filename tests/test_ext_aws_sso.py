@@ -15,7 +15,7 @@ import pytest
 
 from app import extensions
 from app.extensions import base
-from app.extensions.contributions import ContributionError
+from app.extensions.contributions import ContributionError, collect_files
 from app.k8s_templates import build_pod
 from krewhub_ext_aws_sso import AwsSsoExtension, render_config
 from tests.test_k8s_manager import _settings
@@ -149,21 +149,30 @@ def test_pod_copies_the_aws_cli_into_kirocrew_through_an_init_container(monkeypa
     assert path.split(":")[0] == "/opt/krewhub-ext/aws-sso/bin"
 
 
-def test_pod_mounts_the_agent_skill_where_kiro_discovers_it(monkeypatch):
+def test_pod_mounts_the_agent_skill_from_the_tools_volume_where_kiro_discovers_it(monkeypatch):
     pod = _pod(monkeypatch)
     main = pod["spec"]["containers"][0]
-    mount = next(m for m in main["volumeMounts"] if m["name"] == "aws-sso-skill")
-    assert mount == {"name": "aws-sso-skill", "mountPath": "/home/kirocrew/.kiro/skills/aws-sso", "readOnly": True}
-    vol = next(v for v in pod["spec"]["volumes"] if v["name"] == "aws-sso-skill")
-    assert vol["configMap"]["items"] == [{"key": "aws-sso.skills.aws-sso.md", "path": "SKILL.md"}]
+    mount = next(m for m in main["volumeMounts"] if m["mountPath"] == "/home/kirocrew/.kiro/skills/aws-sso")
+    assert mount == {
+        "name": "aws-sso-tools",
+        "mountPath": "/home/kirocrew/.kiro/skills/aws-sso",
+        "subPath": "skills/aws-sso",
+        "readOnly": True,
+    }
+    # a skill vem da imagem: nada dela no ConfigMap de files nem no hash por conteúdo
+    assert "aws-sso-skill" not in {v["name"] for v in pod["spec"]["volumes"]}
     contrib = AwsSsoExtension().pod_contribution(base.BuildContext("d@t", "dev-test-local", "ns", CFG, None))
-    assert base.files_volume_name("aws-sso") in {v["name"] for v in pod["spec"]["volumes"]}
-    assert set(contrib.skills) == {"aws-sso"}
+    assert contrib.skills == {}
+    assert set(collect_files([("aws-sso", contrib)])) == {"aws-sso.config.yaml"}
+
+
+SKILL_FILE = Path(__file__).resolve().parent.parent / "extensions" / "aws-sso" / "skills" / "aws-sso" / "SKILL.md"
 
 
 def test_skill_has_kiro_frontmatter_and_the_guidance_the_agent_needs():
-    from krewhub_ext_aws_sso.skill import SKILL_MD, SKILL_NAME
+    from krewhub_ext_aws_sso import SKILL_NAME
 
+    SKILL_MD = SKILL_FILE.read_text()
     head, _, body = SKILL_MD[4:].partition("\n---\n")
     fields = dict(line.split(": ", 1) for line in head.splitlines())
     assert SKILL_MD.startswith("---\n")
@@ -191,6 +200,7 @@ def test_dockerfile_ships_the_pinned_aws_cli_where_the_init_container_copies_it_
 
     dockerfile = (Path(__file__).resolve().parent.parent / "extensions" / "aws-sso" / "Dockerfile").read_text()
     assert f"COPY --from=awscli /out {TOOLS_SOURCE_DIR}" in dockerfile
+    assert f"COPY skills {TOOLS_SOURCE_DIR}/skills" in dockerfile
     assert "ln -s ../aws-cli/aws /out/bin/aws" in dockerfile
     for arch in ("AMD64", "ARM64"):
         assert re.search(rf"ARG AWSCLI_SHA256_{arch}=[0-9a-f]{{64}}\b", dockerfile)

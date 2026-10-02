@@ -28,7 +28,7 @@ import secrets as _secrets
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-API_VERSION = "1.2"
+API_VERSION = "1.3"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -127,12 +127,22 @@ class ToolsSpec:
       `("sh", "-c", "cp -a --no-preserve=ownership /opt/x/. /tools/")`);
       precisa terminar com `<bin_dir>/` preenchido.
     - `size_limit`: teto do emptyDir (cópia por Pod, descartada com ele).
+    - `skills`: nomes de skills do agente que `command` deixa em
+      `<skills_dir>/<nome>/SKILL.md` (o diretório pode ter outros arquivos,
+      como scripts). O core monta cada `<skills_dir>/<nome>` do volume,
+      somente leitura, em `~/.kiro/skills/<nome>` -- mesmas regras de nome de
+      `PodContribution.skills`. O conteúdo vem da IMAGEM (sem o limite de 1 MiB
+      do ConfigMap); em troca, o hash do spec acompanha a tag da imagem, não o
+      texto da skill. O `name:` do frontmatter não é checado aqui (o core não
+      vê a imagem): a extensão testa o arquivo que embute.
     """
 
     image: str
     command: tuple[str, ...]
     bin_dir: str = "bin"
     size_limit: str = "512Mi"
+    skills: tuple[str, ...] = ()
+    skills_dir: str = "skills"
 
 
 @dataclass
@@ -151,7 +161,10 @@ class PodContribution:
       containers (`files_volume_name(ext_id)`).
     - `tools`: binários expostos no `kirocrew` (ver `ToolsSpec`).
     - `skills`: `{nome: conteúdo do SKILL.md}` -- instruções pro agente do
-      `kirocrew`. O core as monta (somente leitura) em
+      `kirocrew`, guardadas no ConfigMap compartilhado (1 MiB no total por dev,
+      somando `files` de todas as extensões): serve a skills pequenas e a
+      extensões sem imagem. Skills grandes ou com vários arquivos vão pela
+      imagem (`ToolsSpec.skills`). O core as monta (somente leitura) em
       `~/.kiro/skills/<nome>/SKILL.md`, onde o Kiro Crew as descobre sozinho;
       `<nome>` precisa ser o id da extensão ou começar com `<id>-`, e o
       frontmatter precisa trazer `name: <nome>`.

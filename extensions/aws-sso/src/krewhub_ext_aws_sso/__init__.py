@@ -46,7 +46,6 @@ from app.extensions.base import (
     secret_env,
 )
 
-from krewhub_ext_aws_sso.skill import SKILL_MD, SKILL_NAME
 
 logger = logging.getLogger("krewhub.ext.aws-sso")
 
@@ -57,6 +56,8 @@ STATE_DIR = "/state"
 #: AWS CLI v2 embutido na imagem do sidecar; o initContainer `aws-sso-tools`
 #: copia isto pro volume que o `kirocrew` monta (ver `ToolsSpec`)
 TOOLS_SOURCE_DIR = "/opt/krewhub-tools"
+#: skill do agente, entregue pela imagem (extensions/aws-sso/skills/<nome>/SKILL.md)
+SKILL_NAME = "aws-sso"
 CONFIG_DIR = "/etc/aws-sso"
 DEFAULT_IMAGE = "ghcr.io/lucasces/krewhub-ext-aws-sso:0.1.0"
 IMAGE_ENV = "KREWHUB_EXT_AWS_SSO_IMAGE"
@@ -207,8 +208,8 @@ class AwsSsoExtension(Extension):
             tools=ToolsSpec(
                 image=image,
                 command=("sh", "-c", f"cp -a --no-preserve=ownership {TOOLS_SOURCE_DIR}/. {TOOLS_POPULATE_DIR}/"),
+                skills=(SKILL_NAME,),
             ),
-            skills={SKILL_NAME: SKILL_MD},
         )
 
     # --- status ----------------------------------------------------------

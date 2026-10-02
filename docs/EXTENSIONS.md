@@ -158,8 +158,8 @@ anything into it at run time. Two contribution types cover what a
 workspace needs from an extension beyond environment variables.
 
 **`tools`: binaries on the main container's `PATH`.** A `ToolsSpec`
-(`image`, `command`, optional `bin_dir` and `size_limit`) makes KrewHub
-add:
+(`image`, `command`, optional `bin_dir`, `size_limit`, `skills` and
+`skills_dir`) makes KrewHub add:
 
 1. an `emptyDir` volume `<id>-tools`;
 2. an init container `<id>-tools` that runs `command` in `image` with the
@@ -189,15 +189,35 @@ KrewHub sets is the tool directories followed by the Debian default
 extension cannot define `PATH` itself when it contributes tools; the
 administrator's overlay can still change it.
 
-**`skills`: instructions for the agent.** The agent in `kirocrew` (Kiro
+**Skills: instructions for the agent.** The agent in `kirocrew` (Kiro
 Crew) discovers skills by scanning `~/.kiro/skills/<name>/SKILL.md` at
 every invocation and indexes each one by its `name` and `description`
-frontmatter. `skills={"<name>": "<SKILL.md content>"}` mounts each skill
-read-only at that path from the ConfigMap `krewhub-ext-files-<slug>`, so
-it appears when the extension is enabled and disappears when it is not,
-with no configuration by the developer. `<name>` must be the extension id
-or start with `<id>-`, and the content must start with a frontmatter block
-containing `name: <name>`. A skill's content is part of the spec hash.
+frontmatter. A skill appears when the extension is enabled and disappears
+when it is not, with no configuration by the developer. In both delivery
+paths `<name>` must be the extension id or start with `<id>-`, the
+content must start with a frontmatter block containing `name: <name>`,
+and the skill is mounted read-only. Two ways to deliver one:
+
+| | `PodContribution.skills` | `ToolsSpec.skills` |
+|---|---|---|
+| Content comes from | the extension's Python code, as `{name: SKILL.md text}` | the extension image, at `<skills_dir>/<name>/` (default `skills/`), copied by the `tools` init container |
+| Stored in | the ConfigMap `krewhub-ext-files-<slug>`, mounted from `SKILL.md` | the `<id>-tools` volume, mounted from the `<skills_dir>/<name>` sub-path |
+| Size | shares the 1 MiB ConfigMap limit with every extension's `files` for that developer | no practical limit; a skill can include several files, such as scripts |
+| Needs an image | no | yes (the `tools` image) |
+| Spec hash follows | the skill text | the image tag |
+| Editing a skill | change the text and release the central image | change the file, rebuild the extension image and bump its tag |
+
+Use `PodContribution.skills` for a short skill, or when the extension has
+no image of its own. Use `ToolsSpec.skills` when the extension already
+ships a `tools` image and the skill is long, has several files or should
+be versioned with the tools it describes. Because KrewHub does not see
+the image, it does not check that `<skills_dir>/<name>/SKILL.md` exists
+or that its frontmatter matches `<name>`; the extension tests the file it
+ships. A name used in both paths is rejected, since both would mount at
+the same path.
+
+Neither path updates a running Pod: a change to a ConfigMap skill or to
+the image tag changes the spec hash and recreates the Pod.
 
 ## Writing an extension
 
@@ -257,7 +277,9 @@ start URL, required), `sso_region` (required) and `default_region`
 
 - The main container gets the [AWS CLI v2](https://docs.aws.amazon.com/cli/)
   through the `tools` contribution (`aws` on `PATH`; the init container
-  copies it out of the extension image) and the skill `aws-sso`. The skill
+  copies it out of the extension image) and the skill `aws-sso`, which
+  ships in the same image (`extensions/aws-sso/skills/aws-sso/SKILL.md`)
+  and is delivered by the same init container. The skill
   tells the agent that credentials come from the container-credentials
   endpoint with no profiles, to confirm the active role with
   `aws sts get-caller-identity`, to ask before changing resources, and to

@@ -70,13 +70,29 @@ def skill_key(ext_id: str, skill: str) -> str:
     return f"{ext_id}.skills.{skill}.md"
 
 
-def _tools_parts(ext_id: str, tools: ToolsSpec) -> tuple[dict, dict, dict, str]:
-    """(volume, initContainer, mount do kirocrew, diretório pro PATH)."""
+_REL_DIR_RE = r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*"
+
+
+def _check_skill_name(ext_id: str, skill: str) -> None:
+    if not _SKILL_NAME_RE.match(skill) or not _owns(ext_id, skill):
+        raise ContributionError(
+            f"extensão {ext_id!r}: skill {skill!r} precisa se chamar {ext_id!r} ou começar com "
+            f"'{ext_id}-' ([a-z0-9-])"
+        )
+
+
+def _tools_parts(ext_id: str, tools: ToolsSpec) -> tuple[dict, dict, list[dict], str]:
+    """(volume, initContainer, mounts do kirocrew, diretório pro PATH). Os
+    mounts são o do volume inteiro e um por skill da imagem (subPath)."""
     name = f"{ext_id}-tools"
     if not tools.command:
         raise ContributionError(f"extensão {ext_id!r}: tools.command vazio")
-    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*", tools.bin_dir):
+    if not re.fullmatch(_REL_DIR_RE, tools.bin_dir):
         raise ContributionError(f"extensão {ext_id!r}: tools.bin_dir inválido: {tools.bin_dir!r}")
+    if tools.skills and not re.fullmatch(_REL_DIR_RE, tools.skills_dir):
+        raise ContributionError(f"extensão {ext_id!r}: tools.skills_dir inválido: {tools.skills_dir!r}")
+    if len(set(tools.skills)) != len(tools.skills):
+        raise ContributionError(f"extensão {ext_id!r}: tools.skills com nomes repetidos")
     volume = {"name": name, "emptyDir": {"sizeLimit": tools.size_limit}}
     init = {
         "name": name,
@@ -98,8 +114,18 @@ def _tools_parts(ext_id: str, tools: ToolsSpec) -> tuple[dict, dict, dict, str]:
         },
     }
     mount_path = tools_mount_path(ext_id)
-    mount = {"name": name, "mountPath": mount_path, "readOnly": True}
-    return volume, init, mount, f"{mount_path}/{tools.bin_dir}"
+    mounts = [{"name": name, "mountPath": mount_path, "readOnly": True}]
+    for skill in tools.skills:
+        _check_skill_name(ext_id, skill)
+        mounts.append(
+            {
+                "name": name,
+                "mountPath": f"{SKILLS_ROOT}/{skill}",
+                "subPath": f"{tools.skills_dir}/{skill}",
+                "readOnly": True,
+            }
+        )
+    return volume, init, mounts, f"{mount_path}/{tools.bin_dir}"
 
 
 def _frontmatter_names(content: str) -> list[str]:
@@ -119,11 +145,7 @@ def _frontmatter_names(content: str) -> list[str]:
 def _skill_parts(ext_id: str, skill: str, content: str, slug: str) -> tuple[dict, dict]:
     """(volume, mount do kirocrew) de uma skill; o volume é um ConfigMap só
     com o `SKILL.md`, montado como diretório em `~/.kiro/skills/<nome>`."""
-    if not _SKILL_NAME_RE.match(skill) or not _owns(ext_id, skill):
-        raise ContributionError(
-            f"extensão {ext_id!r}: skill {skill!r} precisa se chamar {ext_id!r} ou começar com "
-            f"'{ext_id}-' ([a-z0-9-])"
-        )
+    _check_skill_name(ext_id, skill)
     if skill not in _frontmatter_names(content):
         raise ContributionError(
             f"extensão {ext_id!r}: skill {skill!r} precisa começar com frontmatter contendo "
@@ -206,10 +228,10 @@ def merge_contributions(
         if contrib.files:
             volumes.append(_files_volume(ext_id, slug, contrib.files))
         if contrib.tools:
-            volume, init, mount, bin_path = _tools_parts(ext_id, contrib.tools)
+            volume, init, mounts, bin_path = _tools_parts(ext_id, contrib.tools)
             volumes.append(volume)
             init_containers.append(init)
-            main_mounts.append(mount)
+            main_mounts.extend(mounts)
             tool_dirs.append(bin_path)
         for skill, content in sorted(contrib.skills.items()):
             volume, mount = _skill_parts(ext_id, skill, content, slug)
