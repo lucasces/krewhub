@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import re
 import secrets as _secrets
+import shlex
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-API_VERSION = "1.3"
+API_VERSION = "1.4"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -123,9 +124,11 @@ class ToolsSpec:
     o binário já existe quando o `kirocrew` inicia (um sidecar não dá essa
     garantia: sidecars e container principal sobem em paralelo).
 
-    - `command` copia os arquivos pra `TOOLS_POPULATE_DIR` (ex.:
-      `("sh", "-c", "cp -a --no-preserve=ownership /opt/x/. /tools/")`);
-      precisa terminar com `<bin_dir>/` preenchido.
+    - `command` copia os arquivos pra `TOOLS_POPULATE_DIR`; precisa terminar
+      com `<bin_dir>/` preenchido. Use `tools_copy_command("/opt/x")`: a raiz
+      do emptyDir é do root e o initContainer não é dono dela nem tem
+      `CAP_FOWNER`, então um `cp -a` (ou qualquer `--preserve`) falha ao
+      acertar data/permissão da raiz e o Pod entra em CrashLoopBackOff.
     - `size_limit`: teto do emptyDir (cópia por Pod, descartada com ele).
     - `skills`: nomes de skills do agente que `command` deixa em
       `<skills_dir>/<nome>/SKILL.md` (o diretório pode ter outros arquivos,
@@ -184,6 +187,18 @@ class PodContribution:
 
 def files_volume_name(ext_id: str) -> str:
     return f"{ext_id}-files"
+
+
+def tools_copy_command(source_dir: str) -> tuple[str, ...]:
+    """`ToolsSpec.command` que copia `source_dir` (dentro da imagem) pra
+    `TOOLS_POPULATE_DIR`, mantendo links simbólicos e o bit de execução.
+
+    Nada de `-a`/`--preserve`: o `cp` tentaria ajustar data/permissão da
+    própria raiz do emptyDir, que é do root e não é do usuário do
+    initContainer (sem `CAP_FOWNER` isso dá EPERM e o `cp` sai com 1). Sem
+    preserve, só os arquivos criados pelo `cp` (do próprio usuário) são
+    tocados e o modo de cada um vem da origem, filtrado pelo umask."""
+    return ("sh", "-c", f"cp -dR {shlex.quote(source_dir)}/. {TOOLS_POPULATE_DIR}/")
 
 
 def tools_mount_path(ext_id: str) -> str:
@@ -476,5 +491,6 @@ __all__ = [
     "secret_env",
     "secret_key",
     "secret_name",
+    "tools_copy_command",
     "tools_mount_path",
 ]

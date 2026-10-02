@@ -170,8 +170,16 @@ workspace needs from an extension beyond environment variables.
    `PATH`.
 
 `command` copies the files into `/tools` and must leave `<bin_dir>/` filled
-in. The result is a per-Pod copy that disappears with the Pod; changing
-`image` or `command` changes the spec hash and recreates the Pod.
+in; `tools_copy_command(source_dir)` returns a ready-made one. The result
+is a per-Pod copy that disappears with the Pod; changing `image` or
+`command` changes the spec hash and recreates the Pod.
+
+Do not use `cp -a` or any `--preserve` option in `command`. The root of
+the `emptyDir` belongs to root and the init container has neither that
+ownership nor `CAP_FOWNER`, so setting its timestamps or mode fails with
+`Operation not permitted` and the init container crash-loops.
+`tools_copy_command` runs `cp -dR`, which keeps symlinks and the
+executable bit.
 
 Alternatives considered:
 

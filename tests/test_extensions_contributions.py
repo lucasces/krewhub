@@ -147,7 +147,7 @@ def test_failed_merge_does_not_leak_into_other_calls(settings):
 
 
 def _tools(**kw):
-    return ToolsSpec(image="example/tools:1", command=("sh", "-c", "cp -a /x/. /tools/"), **kw)
+    return ToolsSpec(image="example/tools:1", command=("sh", "-c", "cp -dR /x/. /tools/"), **kw)
 
 
 def test_tools_expand_into_init_container_volume_mount_and_path(settings):
@@ -155,7 +155,7 @@ def test_tools_expand_into_init_container_volume_mount_and_path(settings):
     spec = pod["spec"]
     init = next(c for c in spec["initContainers"] if c["name"] == "demo-tools")
     assert init["image"] == "example/tools:1"
-    assert init["command"] == ["sh", "-c", "cp -a /x/. /tools/"]
+    assert init["command"] == ["sh", "-c", "cp -dR /x/. /tools/"]
     assert init["volumeMounts"] == [{"name": "demo-tools", "mountPath": "/tools"}]
     sc = init["securityContext"]
     assert sc["runAsNonRoot"] and sc["readOnlyRootFilesystem"] and not sc["allowPrivilegeEscalation"]

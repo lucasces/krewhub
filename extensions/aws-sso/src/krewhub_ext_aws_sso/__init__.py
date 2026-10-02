@@ -39,11 +39,11 @@ from app.extensions.base import (
     Link,
     PodContribution,
     Status,
-    TOOLS_POPULATE_DIR,
     ToolsSpec,
     derive_state,
     files_volume_name,
     secret_env,
+    tools_copy_command,
 )
 
 
@@ -207,7 +207,7 @@ class AwsSsoExtension(Extension):
             files={"config.yaml": render_config(cfg)},
             tools=ToolsSpec(
                 image=image,
-                command=("sh", "-c", f"cp -a --no-preserve=ownership {TOOLS_SOURCE_DIR}/. {TOOLS_POPULATE_DIR}/"),
+                command=tools_copy_command(TOOLS_SOURCE_DIR),
                 skills=(SKILL_NAME,),
             ),
         )
