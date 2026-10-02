@@ -299,6 +299,15 @@ class ExtView:
         return CardView(self.ext_id, self.name, self.state, self.card, self.actions, self.last_action)
 
 
+def wants_refresh(views) -> bool:
+    """O iframe de cartões recarrega sozinho enquanto o Pod não está pronto
+    (`pending`) ou alguma extensão declara que espera algo externo
+    (`Card.polling`). `needs_action` sozinho NÃO basta: é também o estado
+    estável "o dev precisa escolher algo", e recarregar apagaria o que ele
+    está digitando num formulário de ação."""
+    return any(v.state == "pending" or v.card.polling for v in views)
+
+
 def _buttons(ext: Extension, conditions: Mapping[str, bool], *, usable: bool) -> tuple[ActionButton, ...]:
     return tuple(
         ActionButton(

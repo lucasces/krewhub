@@ -10,7 +10,7 @@ import pytest
 
 from app import chp_client, k8s_manager, kiro_login, session_client, store
 from app import k8s_templates as tpl
-from app.extensions import runtime
+from app.extensions import base, runtime
 from tests.ext_demo import demo_installed, enable_demo, fake_clients, pod  # noqa: F401
 from tests.test_close_logout import mocked_revoke, mocked_teardown, provisioned  # noqa: F401
 
@@ -286,3 +286,27 @@ def test_cleanup_failure_does_not_break_close(with_secret, login, monkeypatch):
     fc.core.patch_namespaced_secret.side_effect = RuntimeError("k8s caiu")
     login(client)
     assert client.get("/close").status_code == 200
+
+
+@pytest.mark.parametrize("polling", [True, False])
+def test_extensions_cards_refresh_while_an_extension_is_waiting_on_something_external(
+    ext_client, login, fake_clients, monkeypatch, polling  # noqa: F811
+):
+    """Regressão: o estado "esperando o dev autorizar no portal" é
+    `needs_action`, nunca `pending`, e a página não recarregava. Mas
+    `needs_action` sem espera externa (ex.: dev escolhendo um papel) NÃO
+    pode recarregar, senão apaga o que ele digita."""
+    from tests.ext_demo import DemoExtension
+
+    def status(self, ctx):
+        card = base.Card(title="Demo", state="needs_action", summary="aguardando", polling=polling)
+        return base.Status(conditions={}, card=card, state="needs_action")
+
+    monkeypatch.setattr(DemoExtension, "status", status)
+    client, s = ext_client
+    enable_demo(s)
+    _ready(fake_clients)
+    login(client)
+    r = client.get(f"{URL}/extensions/cards")
+    assert r.status_code == 200 and "aguardando" in r.text
+    assert ('http-equiv="refresh"' in r.text) is polling

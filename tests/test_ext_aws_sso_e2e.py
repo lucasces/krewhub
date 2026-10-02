@@ -14,6 +14,7 @@ import pytest
 from app import extensions, pod_exec, store
 from app.extensions import runtime
 from tests.ext_demo import fake_clients, pod  # noqa: F401
+from tests.ws_fake import real_exec_clients
 
 OWNER = "dev-a@test.local"
 URL = "/devs/dev-a%40test.local"
@@ -203,3 +204,88 @@ def test_follow_up_actions_write_request_files_through_exec(aws_client, sidecar)
     joined = "\n".join(sidecar.scripts)
     assert "/state/req/refresh" in joined
     assert "/state/req/profile" in joined and "123456789012:Admin" in joined
+
+
+def _use_real_exec(monkeypatch, fake_clients, stdout):  # noqa: F811
+    """`exec_sh` REAL + `stream`/`ApiClient` reais do kubernetes; só o socket
+    devolve `stdout`. É o caminho que os outros testes pulam ao trocar
+    `exec_sh` inteiro."""
+    fake_clients.core.connect_get_namespaced_pod_exec = real_exec_clients(
+        monkeypatch, stdout
+    ).core.connect_get_namespaced_pod_exec
+
+
+def test_status_json_written_by_the_supervisor_survives_the_real_exec_path(
+    aws_client, monkeypatch, fake_clients  # noqa: F811
+):
+    """Regressão (cluster real): o status.json do supervisor é JSON com
+    true/false/"" e o exec devolvia a repr do Python, o parse falhava em
+    silêncio e o card ficava eternamente em "faça login"."""
+    _, s = aws_client
+    status = {
+        "ts": 1769800000.5, "server": True, "logged_in": True, "profile": "",
+        "loaded": False, "roles": 402, "role_names": ["111111111111:Admin"], "error": "",
+    }
+    _use_real_exec(monkeypatch, fake_clients, json.dumps(status) + "\n")
+
+    (view,) = runtime.evaluate(s, OWNER)
+    assert view.conditions["sso.server"] and view.conditions["sso.logged_in"]
+    assert not view.conditions["sso.creds_loaded"]
+    assert view.card.summary == "Login feito. Escolha o papel que o ambiente deve assumir."
+    assert ("Papéis disponíveis", "402") in view.card.rows
+
+
+def test_ready_status_through_the_real_exec_path(aws_client, monkeypatch, fake_clients):  # noqa: F811
+    _, s = aws_client
+    status = {"server": True, "logged_in": True, "profile": "1:Admin", "loaded": True, "error": ""}
+    _use_real_exec(monkeypatch, fake_clients, json.dumps(status))
+    (view,) = runtime.evaluate(s, OWNER)
+    assert view.state == "ready"
+
+
+def test_unreadable_status_json_is_logged_not_silent(aws_client, monkeypatch, fake_clients, caplog):  # noqa: F811
+    _, s = aws_client
+    _use_real_exec(monkeypatch, fake_clients, "{'server': True}")
+    with caplog.at_level("WARNING", logger="krewhub.ext.aws-sso"):
+        (view,) = runtime.evaluate(s, OWNER)
+    assert view.state == "needs_action" and not view.conditions["sso.logged_in"]
+    assert "status.json ilegível" in caplog.text
+
+
+def test_cards_refresh_by_themselves_after_start_login_until_the_dev_authorizes(
+    aws_client, sidecar, login
+):
+    """Regressão (cluster real): depois de `start_login` o card diz "a
+    página atualiza sozinha", mas o estado é `needs_action` e nada
+    recarregava -- o dev ficava olhando o código para sempre."""
+    client, s = aws_client
+    login(client)
+    runtime.run_action(s, OWNER, "aws-sso", "start_login", {})
+
+    waiting = client.get(f"{URL}/extensions/cards")
+    assert CODE in waiting.text and 'http-equiv="refresh"' in waiting.text
+
+    sidecar.status = {
+        "server": True, "logged_in": True, "roles": 2, "role_names": ["1:Admin", "2:Dev"],
+    }
+    choosing = client.get(f"{URL}/extensions/cards")
+    assert "Escolha o papel" in choosing.text
+    assert 'http-equiv="refresh"' not in choosing.text  # o dev está digitando o perfil
+
+
+@pytest.mark.parametrize(
+    "status,polling",
+    [
+        ({"server": True, "logged_in": False}, False),  # nada pedido ainda
+        ({"server": True, "logged_in": True, "roles": 1, "role_names": ["1:A"]}, True),  # auto-seleção
+        ({"server": True, "logged_in": True, "roles": 3}, False),  # dev escolhe
+        ({"server": True, "logged_in": True, "profile": "1:A", "loaded": False}, True),
+        ({"server": True, "logged_in": True, "profile": "1:A", "loaded": False, "error": "boom"}, False),
+        ({"server": True, "logged_in": True, "profile": "1:A", "loaded": True}, False),
+    ],
+)
+def test_aws_sso_card_polls_only_while_waiting_on_something(aws_client, sidecar, status, polling):
+    _, s = aws_client
+    sidecar.status = status
+    (view,) = runtime.evaluate(s, OWNER)
+    assert view.card.polling is polling

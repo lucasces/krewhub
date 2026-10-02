@@ -1185,10 +1185,10 @@ def extensions_status(owner_id: str, _owner: str = Depends(require_owner)) -> di
 @app.get("/devs/{owner_id}/extensions/cards", response_class=HTMLResponse)
 def extensions_cards(owner_id: str, _owner: str = Depends(require_owner)) -> HTMLResponse:
     """Cartões das extensões (HTML puro, sem JS). Embutido via `<iframe>`
-    na página final do lobby; recarrega sozinho (`meta refresh`) enquanto
-    alguma extensão está `pending`."""
+    na página final do lobby; recarrega sozinho (`meta refresh`) conforme
+    `ext_runtime.wants_refresh`."""
     views = ext_runtime.evaluate(_settings, owner_id)
-    refresh = 5 if any(v.state == "pending" for v in views) else None
+    refresh = 5 if ext_runtime.wants_refresh(views) else None
     return HTMLResponse(
         ext_ui.render_cards_document(
             owner_id,

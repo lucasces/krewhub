@@ -302,3 +302,36 @@ def test_card_rendering_escapes_and_filters_links():
 def test_cards_document_refresh_only_when_requested():
     assert 'http-equiv="refresh"' not in ui.render_cards_document("o", [], lambda e, a: "")
     assert 'content="5"' in ui.render_cards_document("o", [], lambda e, a: "", refresh_seconds=5)
+
+
+@pytest.mark.parametrize(
+    "state,polling,expected",
+    [
+        ("pending", False, True),
+        ("needs_action", True, True),
+        ("degraded", True, True),
+        ("needs_action", False, False),  # formulário de ação aberto: não pode recarregar
+        ("degraded", False, False),
+        ("ready", False, False),
+        ("inactive", False, False),
+        ("error", False, False),
+    ],
+)
+def test_wants_refresh_follows_pending_or_the_extensions_polling_flag(state, polling, expected):
+    from types import SimpleNamespace
+
+    from app.extensions.base import Card
+
+    view = SimpleNamespace(state=state, card=Card(title="x", state=state, polling=polling))
+    assert runtime.wants_refresh([view]) is expected
+
+
+def test_wants_refresh_is_true_when_any_extension_wants_it():
+    from types import SimpleNamespace
+
+    from app.extensions.base import Card
+
+    quiet = SimpleNamespace(state="ready", card=Card(title="a"))
+    waiting = SimpleNamespace(state="needs_action", card=Card(title="b", polling=True))
+    assert runtime.wants_refresh([quiet, waiting]) is True
+    assert runtime.wants_refresh([]) is False

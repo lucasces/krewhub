@@ -28,7 +28,7 @@ import secrets as _secrets
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -165,7 +165,12 @@ class Card:
     """Cartão server-rendered. `code` é um texto de destaque (ex.: código
     de device-flow). `links` só aceitam http(s) (o renderer descarta o
     resto). Ações NÃO vêm aqui: o core desenha os botões de
-    `Extension.actions` conforme as condições."""
+    `Extension.actions` conforme as condições.
+
+    `polling=True` diz que a extensão espera algo FORA do lobby (ex.: o
+    dev autorizar um login no navegador) e que o cartão deve recarregar
+    sozinho até isso mudar. Só ligue enquanto espera: o recarregamento
+    descarta o que o dev estiver digitando nos formulários das ações."""
 
     title: str
     state: str = "pending"
@@ -174,6 +179,7 @@ class Card:
     links: tuple[Link, ...] = ()
     code: str = ""
     messages: tuple[str, ...] = ()
+    polling: bool = False
 
 
 @dataclass

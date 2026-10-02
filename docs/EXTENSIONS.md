@@ -36,7 +36,8 @@ and has two parts.
 - `on_pod_ready(ctx)` — runs once after each provision, best effort.
 
 The context passed to hooks offers `exec` (run a shell script in a
-container of the dev Pod), `run_detached` (run a long-lived command in a
+container of the dev Pod and get its output exactly as printed),
+`run_detached` (run a long-lived command in a
 pseudo-terminal and read its output until a marker appears, for flows
 like device-code logins), `get_secret` and a persisted `state` dict.
 
@@ -53,7 +54,7 @@ Conditions are named booleans. KrewHub always provides `pod.ready` and
 |---|---|
 | `inactive` | The developer has not enabled the extension. |
 | `pending` | The Pod is not ready yet. |
-| `needs_action` | The developer must do something (usually press a button). |
+| `needs_action` | The developer must do something (usually press a button), or the extension is waiting for something outside the lobby. |
 | `ready` | Working. |
 | `degraded` | Working partially. |
 | `error` | Invalid configuration, or a hook raised an exception. The card shows a generic message; the exception goes to the log only. |
@@ -62,7 +63,11 @@ Conditions are named booleans. KrewHub always provides `pod.ready` and
 
 The lobby is server-rendered without JavaScript. Cards are served by
 `GET /devs/{owner_id}/extensions/cards` inside an iframe and refresh
-themselves with a `<meta refresh>` while any extension is `pending`.
+themselves with a `<meta refresh>` while any extension is `pending` or
+sets `Card.polling`. An extension sets `polling` only while it waits for
+something outside the lobby, such as the developer authorizing a login in
+another tab: a refresh discards what is typed into an action form, so
+`needs_action` alone does not trigger it.
 All extension text is HTML-escaped by a single renderer, and links are
 accepted only with `http`/`https`. Actions are `POST
 /devs/{owner_id}/extensions/{ext_id}/actions/{action_id}`: browsers send

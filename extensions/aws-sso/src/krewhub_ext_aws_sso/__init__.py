@@ -16,6 +16,7 @@ escrevem arquivos de pedido em `/state/req/`."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -38,6 +39,8 @@ from app.extensions.base import (
     files_volume_name,
     secret_env,
 )
+
+logger = logging.getLogger("krewhub.ext.aws-sso")
 
 EXT_ID = "aws-sso"
 SIDECAR = "aws-sso"
@@ -189,7 +192,8 @@ class AwsSsoExtension(Extension):
         raw = ctx.exec(f"cat {STATE_DIR}/status.json 2>/dev/null || true").strip()
         try:
             data = json.loads(raw) if raw else {}
-        except ValueError:
+        except ValueError as exc:
+            logger.warning("status.json ilegível no sidecar (%s); assumindo estado vazio", exc)
             data = {}
         return data if isinstance(data, dict) else {}
 
@@ -214,6 +218,7 @@ class AwsSsoExtension(Extension):
         roles = st.get("role_names") or []
         links: tuple[Link, ...] = ()
         code = ""
+        polling = False
         messages: list[str] = []
 
         if state == "ready":
@@ -226,13 +231,17 @@ class AwsSsoExtension(Extension):
             if login.get("url") and time.time() - float(login.get("at", 0)) < LOGIN_URL_STALE_SECONDS:
                 links = (Link("Autorizar no portal AWS", str(login["url"])),)
                 code = str(login.get("code") or "")
+                polling = True
                 messages.append("Depois de autorizar, a página atualiza sozinha.")
         elif not profile:
             summary = "Login feito. Escolha o papel que o ambiente deve assumir."
             if roles:
                 messages.append("Perfis: " + ", ".join(str(r) for r in roles[:20]))
+            # com um único papel o supervisor o seleciona sozinho
+            polling = int(st.get("roles") or 0) == 1
         else:
             summary = "Papel escolhido, credenciais ainda não carregadas."
+            polling = not st.get("error")
         if st.get("error"):
             messages.append(str(st["error"]))
 
@@ -244,6 +253,7 @@ class AwsSsoExtension(Extension):
             links=links,
             code=code,
             messages=tuple(messages),
+            polling=polling,
         )
         return Status(conditions=conditions, card=card, state=state)
 
