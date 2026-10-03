@@ -539,6 +539,7 @@ dependencies = [
 dev = [
     { name = "httpx2" },
     { name = "krewhub-ext-aws-sso" },
+    { name = "krewhub-ext-github" },
     { name = "pytest" },
 ]
 
@@ -555,6 +556,7 @@ requires-dist = [
 dev = [
     { name = "httpx2", specifier = ">=2.13.1" },
     { name = "krewhub-ext-aws-sso", editable = "extensions/aws-sso" },
+    { name = "krewhub-ext-github", editable = "extensions/github" },
     { name = "pytest", specifier = ">=9.1.1" },
 ]
 
@@ -562,6 +564,11 @@ dev = [
 name = "krewhub-ext-aws-sso"
 version = "0.1.0"
 source = { editable = "extensions/aws-sso" }
+
+[[package]]
+name = "krewhub-ext-github"
+version = "0.1.0"
+source = { editable = "extensions/github" }
 
 [[package]]
 name = "kubernetes"
