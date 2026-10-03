@@ -109,12 +109,14 @@ def test_pod_has_hardened_sidecar_and_private_state(monkeypatch):
     assert "readinessProbe" not in side
 
     mounts = {m["mountPath"]: m for m in side["volumeMounts"]}
-    assert set(mounts) == {"/state", "/tmp", "/etc/aws-sso"}
+    assert set(mounts) == {"/state", "/tmp", "/etc/aws-sso", "/profiles"}
     assert mounts["/etc/aws-sso"]["readOnly"] is True
+    assert "readOnly" not in mounts["/profiles"]
     # o token SSO vive no emptyDir privado: o kirocrew não o monta
     assert "aws-sso-state" not in {m["name"] for m in main["volumeMounts"]}
     vols = {v["name"]: v for v in spec["volumes"]}
     assert vols["aws-sso-state"] == {"name": "aws-sso-state", "emptyDir": {}}
+    assert vols["aws-sso-profiles"] == {"name": "aws-sso-profiles", "emptyDir": {}}
     assert vols["aws-sso-files"]["configMap"]["items"] == [{"key": "aws-sso.config.yaml", "path": "config.yaml"}]
 
 
@@ -130,6 +132,18 @@ def test_pod_main_env_points_sdk_at_the_sidecar_with_the_bearer(monkeypatch):
     ref = env["KREWHUB_AWS_SSO_TOKEN"]["valueFrom"]["secretKeyRef"]
     assert ref == {"name": "krewhub-ext-dev-test-local", "key": "aws-sso.bearer"}
     assert "value" not in env["KREWHUB_AWS_SSO_TOKEN"]
+
+
+def test_pod_shares_the_managed_profiles_file_with_kirocrew_read_only(monkeypatch):
+    pod = _pod(monkeypatch)
+    main, side = pod["spec"]["containers"]
+    mounts = {m["mountPath"]: m for m in main["volumeMounts"]}
+    assert mounts["/etc/krewhub/aws-sso"] == {"name": "aws-sso-profiles", "mountPath": "/etc/krewhub/aws-sso", "readOnly": True}
+    env = {e["name"]: e.get("value") for e in main["env"]}
+    assert env["AWS_CONFIG_FILE"] == "/etc/krewhub/aws-sso/config"
+    # o supervisor escreve o `credential_process` apontando pro helper que o initContainer copia
+    side_env = {e["name"]: e.get("value") for e in side["env"]}
+    assert side_env["AWS_SSO_HELPER"] == "/opt/krewhub-ext/aws-sso/bin/krewhub-aws-sso-creds"
 
 
 def test_pod_copies_the_aws_cli_into_kirocrew_through_an_init_container(monkeypatch):
@@ -184,11 +198,17 @@ def test_skill_has_kiro_frontmatter_and_the_guidance_the_agent_needs():
         "/opt/krewhub-ext/aws-sso/bin/aws",
         "aws configure",
         "aws sso login",
+        "aws configure list-profiles",
         "--profile",
+        "AWS_PROFILE",
+        "AWS_CONFIG_FILE",
+        "default",
         "boto3",
         "KrewHub",
     ):
         assert needle in body, needle
+    # os papéis ativos são perfis nomeados, mas o agente nunca faz login nem configura nada
+    assert "There are **no profiles**" not in body and "Do not pass `--profile`" not in body
     # nada de credencial de exemplo no texto
     assert "AKIA" not in SKILL_MD and "ASIA" not in SKILL_MD
 
@@ -202,6 +222,7 @@ def test_dockerfile_ships_the_pinned_aws_cli_where_the_init_container_copies_it_
     assert f"COPY --from=awscli /out {TOOLS_SOURCE_DIR}" in dockerfile
     assert f"COPY skills {TOOLS_SOURCE_DIR}/skills" in dockerfile
     assert "ln -s ../aws-cli/aws /out/bin/aws" in dockerfile
+    assert f"COPY credential_process.py {TOOLS_SOURCE_DIR}/bin/krewhub-aws-sso-creds" in dockerfile
     for arch in ("AMD64", "ARM64"):
         assert re.search(rf"ARG AWSCLI_SHA256_{arch}=[0-9a-f]{{64}}\b", dockerfile)
     assert "sha256sum -c" in dockerfile
@@ -241,14 +262,46 @@ def test_status_ignores_stale_login_link():
     assert st.card.links == () and st.card.code == ""
 
 
-def test_status_logged_in_without_role_then_ready():
-    st = _status({"server": True, "logged_in": True, "roles": 2, "role_names": ["111111111111:Admin", "222222222222:Dev"], "profile": ""})
+def test_status_logged_in_without_role_offers_every_role_as_a_checkbox_option():
+    st = _status({"server": True, "logged_in": True, "roles": 2, "role_names": ["111111111111:Admin", "222222222222:Dev"], "profiles": []})
     assert st.state == "needs_action"
-    assert "111111111111:Admin" in " ".join(st.card.messages)
-    st = _status({"server": True, "logged_in": True, "profile": "111111111111:Admin", "loaded": True})
+    assert "Marque" in st.card.summary
+    opts = st.choices["apply_roles.profiles"]
+    assert [(c.value, c.checked) for c in opts] == [("111111111111:Admin", False), ("222222222222:Dev", False)]
+
+
+def test_status_ready_with_one_role_shows_no_default_marker():
+    st = _status({"server": True, "logged_in": True, "profile": "111111111111:Admin", "profiles": ["111111111111:Admin"],
+                  "loaded_profiles": ["111111111111:Admin"], "loaded": True})
     assert st.state == "ready"
     assert ("Papel", "111111111111:Admin") in st.card.rows
     assert st.conditions["sso.role_selected"] and st.conditions["sso.creds_loaded"]
+
+
+def test_status_lists_all_active_roles_marks_the_default_and_the_ones_without_credentials():
+    active = ["111111111111:Admin", "222222222222:Dev", "333333333333:Ops"]
+    st = _status({
+        "server": True, "logged_in": True, "profile": active[0], "profiles": active,
+        "loaded_profiles": active[:2], "loaded": False, "roles": 4,
+        "role_names": [*active, "444444444444:Audit"],
+        "role_labels": {active[0]: "Prod"},
+        "error": "Não foi possível carregar as credenciais de um ou mais papéis.",
+    })
+    assert ("Papel", "111111111111:Admin (padrão)") in st.card.rows
+    assert ("Papel", "222222222222:Dev") in st.card.rows
+    assert ("Papel", "333333333333:Ops (sem credenciais)") in st.card.rows
+    assert ("Conta", "Prod") in st.card.rows
+    assert st.state != "ready"
+    opts = st.choices["apply_roles.profiles"]
+    assert [(c.value, c.checked) for c in opts] == [(r, True) for r in active] + [("444444444444:Audit", False)]
+
+
+def test_ready_card_with_several_roles_explains_how_to_pick_a_non_default_one():
+    active = ["111111111111:Admin", "222222222222:Dev"]
+    st = _status({"server": True, "logged_in": True, "profile": active[0], "profiles": active,
+                  "loaded_profiles": active, "loaded": True})
+    assert st.state == "ready"
+    assert any("--profile" in m and active[0] in m for m in st.card.messages)
 
 
 def test_status_pending_when_sidecar_not_running_and_tolerates_garbage():
@@ -271,51 +324,28 @@ def test_apply_roles_rejects_shell_metacharacters():
     ran: list[str] = []
     ctx = _ctx(lambda s: ran.append(s) or "")
     with pytest.raises(base.ExtensionError):
-        ext.handle_action(ctx, "apply_roles", {"profile": "x; rm -rf /"})
+        ext.handle_action(ctx, "apply_roles", {"profiles": ("123456789012:Admin", "x; rm -rf /")})
     assert ran == []
 
 
-def test_apply_roles_writes_quoted_request():
+def test_apply_roles_writes_the_desired_set_one_per_line_in_order():
     ran: list[str] = []
     ext = AwsSsoExtension()
-    res = ext.handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": "123456789012:Admin"})
+    res = ext.handle_action(
+        _ctx(lambda s: ran.append(s) or ""), "apply_roles",
+        {"profiles": ("222222222222:Dev", "123456789012:Admin", "222222222222:Dev")},
+    )
     assert res.ok
-    assert "/state/req/profile" in ran[0] and "123456789012:Admin" in ran[0]
+    assert "/state/req/profiles" in ran[0]
+    assert "'222222222222:Dev\n123456789012:Admin'" in ran[0]
 
 
-def test_start_login_parses_url_and_code_and_stores_them():
-    calls = {}
-
-    def detached(container, command, tag, script, markers, timeout):
-        calls.update(container=container, command=command, tag=tag, markers=markers)
-        return (
-            "Please open the following URL in your browser:\r\n"
-            "https://device.sso.us-east-1.amazonaws.com/?user_code=WXYZ-1234\r\n"
-        )
-
-    state: dict = {}
-    res = AwsSsoExtension().handle_action(_ctx(lambda s: "", state=state, detached=detached), "start_login", {})
-    assert res.ok
-    assert state["login"]["code"] == "WXYZ-1234"
-    assert state["login"]["url"].startswith("https://device.sso.us-east-1.amazonaws.com/")
-    assert res.card.links[0].url == state["login"]["url"]
-    assert calls["tag"] == "awssso_login" and calls["container"] == "aws-sso"
-    script = calls["command"][-1]
-    assert "login --url-action print" in script and "touch /state/login_ok" in script
-
-
-def test_start_login_without_url_is_a_user_error():
+def test_apply_roles_caps_the_number_of_active_roles():
     ext = AwsSsoExtension()
-    ctx = _ctx(lambda s: "", detached=lambda *a: "FATAL boom\n")
-    with pytest.raises(base.ExtensionError):
-        ext.handle_action(ctx, "start_login", {})
-
-
-def test_start_login_ignores_foreign_urls_in_log():
-    ext = AwsSsoExtension()
-    ctx = _ctx(lambda s: "", detached=lambda *a: "see https://evil.test/x then https://d-1.awsapps.com/start/#/device?user_code=AAAA-BBBB")
-    res = ext.handle_action(ctx, "start_login", {})
-    assert res.card.links[0].url.startswith("https://d-1.awsapps.com/")
+    ok = tuple(f"{i:012d}:R" for i in range(10))
+    assert ext.handle_action(_ctx(lambda s: ""), "apply_roles", {"profiles": ok}).ok
+    with pytest.raises(base.ExtensionError, match="no máximo 10"):
+        ext.handle_action(_ctx(lambda s: ""), "apply_roles", {"profiles": (*ok, "999999999999:R")})
 
 
 # --- supervisor + protocolo de pedidos ---------------------------------------
@@ -357,14 +387,22 @@ def sidecar(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_LIST_FAIL", str(tmp_path / "list_fail"))
     monkeypatch.setenv("FAKE_LOAD_FAIL", str(tmp_path / "load_fail"))
     monkeypatch.setattr(sup, "STATE", state)
+    monkeypatch.setattr(sup, "PROFILES_DIR", tmp_path / "profiles")
+    monkeypatch.setattr(sup, "HELPER", "/opt/krewhub-ext/aws-sso/bin/krewhub-aws-sso-creds")
     monkeypatch.setattr(sup, "CONFIG_SRC", cfg_src)
     monkeypatch.setattr(sup, "AWS_SSO", str(fake))
+    monkeypatch.setattr(sup, "delete_slot", lambda profile: _record_delete(tmp_path, profile))
     s = sup.Supervisor()
     s.setup()
     yield sup, s, state, tmp_path
     if s.server:
         s.server.kill()
         s.server.wait()
+
+
+def _record_delete(tmp_path, profile):
+    with (tmp_path / "calls.log").open("a") as f:
+        f.write(f"DELETE /slot/{profile}\n")
 
 
 def _calls(tmp_path):
@@ -399,22 +437,30 @@ def test_supervisor_starts_server_with_bearer_before_login(sidecar):
     assert st["server"] is True and st["logged_in"] is False and st["loaded"] is False
 
 
+def _login(state, s):
+    s.tick()
+    (state / "login_ok").touch()  # o que o fluxo de login faz ao terminar
+    s.tick()
+
+
+def _loads(tmp_path):
+    return [c for c in _calls(tmp_path) if c.startswith("ecs load")]
+
+
 def test_full_flow_through_extension_requests(sidecar):
     _, s, state, tmp = sidecar
     ext = AwsSsoExtension()
     ctx = _ctx(lambda script: _run_script(state, script))
 
-    s.tick()
-    (state / "login_ok").touch()  # o que o fluxo de login faz ao terminar
-    s.tick()
+    _login(state, s)
     st = _status_file(state)
-    assert st["logged_in"] and st["roles"] == 2 and st["profile"] == ""
+    assert st["logged_in"] and st["roles"] == 2 and st["profiles"] == []
     assert not st["loaded"]
 
-    ext.handle_action(ctx, "apply_roles", {"profile": "222222222222:Dev"})
+    ext.handle_action(ctx, "apply_roles", {"profiles": ("222222222222:Dev",)})
     s.tick()
     st = _status_file(state)
-    assert st["profile"] == "222222222222:Dev" and st["loaded"] is True
+    assert st["profile"] == "222222222222:Dev" and st["profiles"] == ["222222222222:Dev"] and st["loaded"] is True
     assert "ecs load --profile 222222222222:Dev --server localhost:4144" in _calls(tmp)
 
     ext.handle_action(ctx, "reload_creds", {})
@@ -428,25 +474,144 @@ def test_full_flow_through_extension_requests(sidecar):
     assert not list((state / "req").iterdir())  # pedidos consumidos
 
 
-def test_unknown_profile_is_rejected_by_supervisor(sidecar):
+def test_first_role_is_the_default_and_the_others_are_slotted(sidecar):
     _, s, state, tmp = sidecar
+    _login(state, s)
+    (state / "req/profiles").write_text("222222222222:Dev\n111111111111:Admin")
     s.tick()
-    (state / "login_ok").touch()
+    assert _loads(tmp) == [
+        "ecs load --profile 222222222222:Dev --server localhost:4144",
+        "ecs load --profile 111111111111:Admin --server localhost:4144 --slotted",
+    ]
+    st = _status_file(state)
+    assert st["profile"] == "222222222222:Dev"
+    assert st["profiles"] == ["222222222222:Dev", "111111111111:Admin"]
+    assert st["loaded_profiles"] == st["profiles"] and st["loaded"] is True
+
+
+def test_profiles_file_has_one_credential_process_profile_per_active_role(sidecar):
+    _, s, state, tmp = sidecar
+    assert "[profile" not in (tmp / "profiles/config").read_text()
+    _login(state, s)
+    (state / "req/profiles").write_text("222222222222:Dev\n111111111111:Admin")
     s.tick()
-    (state / "req/profile").write_text("999999999999:Nope")
+    helper = "/opt/krewhub-ext/aws-sso/bin/krewhub-aws-sso-creds"
+    assert (tmp / "profiles/config").read_text().splitlines()[1:] == [
+        "",
+        "[profile 222222222222:Dev]",
+        f"credential_process = python3 {helper} 222222222222:Dev --default",
+        "",
+        "[profile 111111111111:Admin]",
+        f"credential_process = python3 {helper} 111111111111:Admin",
+    ]
+    assert not (tmp / "profiles/config.tmp").exists()
+
+
+def test_selection_is_a_desired_set_that_unloads_dropped_slots_and_promotes_the_default(sidecar):
+    _, s, state, tmp = sidecar
+    (tmp / "roles.csv").write_text("Profile\n111111111111:Admin\n222222222222:Dev\n333333333333:Ops\n")
+    _login(state, s)
+    (state / "req/profiles").write_text("111111111111:Admin\n222222222222:Dev\n333333333333:Ops")
+    s.tick()
+    calls_before = len(_calls(tmp))
+
+    # tira o padrão e um slot: Dev vira o padrão, Ops sai
+    (state / "req/profiles").write_text("222222222222:Dev")
+    s.tick()
+    new = _calls(tmp)[calls_before:]
+    assert "DELETE /slot/333333333333:Ops" in new
+    # Dev sai do slot antes de virar padrão; o padrão antigo (Admin) nunca é apagado, só substituído
+    assert "DELETE /slot/222222222222:Dev" in new
+    assert "DELETE /slot/111111111111:Admin" not in new
+    assert new.index("DELETE /slot/222222222222:Dev") < new.index("ecs load --profile 222222222222:Dev --server localhost:4144")
+    st = _status_file(state)
+    assert st["profiles"] == ["222222222222:Dev"] and st["loaded_profiles"] == ["222222222222:Dev"]
+    assert "[profile 111111111111:Admin]" not in (tmp / "profiles/config").read_text()
+
+
+def test_empty_selection_is_rejected_and_keeps_the_active_roles(sidecar):
+    _, s, state, tmp = sidecar
+    _login(state, s)
+    (state / "req/profiles").write_text("111111111111:Admin")
+    s.tick()
+    (state / "req/profiles").write_text("\n")
     s.tick()
     st = _status_file(state)
-    assert st["profile"] == "" and "desconhecido" in st["error"]
-    assert not any(c.startswith("ecs load") for c in _calls(tmp))
+    assert st["profiles"] == ["111111111111:Admin"] and "ao menos um" in st["error"]
+
+
+def test_unchanged_selection_is_not_reloaded_on_every_tick(sidecar):
+    _, s, state, tmp = sidecar
+    _login(state, s)
+    (state / "req/profiles").write_text("111111111111:Admin\n222222222222:Dev")
+    s.tick()
+    n = len(_loads(tmp))
+    s.tick()
+    s.tick()
+    assert len(_loads(tmp)) == n
+
+
+def test_reload_request_refreshes_every_active_role(sidecar):
+    _, s, state, tmp = sidecar
+    _login(state, s)
+    (state / "req/profiles").write_text("111111111111:Admin\n222222222222:Dev")
+    s.tick()
+    (state / "req/reload").write_text("1")
+    s.tick()
+    refreshed = [c for c in _loads(tmp) if c.endswith("--sts-refresh")]
+    assert len(refreshed) == 2
+    assert any("222222222222:Dev" in c and "--slotted" in c for c in refreshed)
+
+
+def test_selection_survives_a_supervisor_restart_and_a_new_login(sidecar, monkeypatch):
+    sup, s, state, tmp = sidecar
+    _login(state, s)
+    (state / "req/profiles").write_text("222222222222:Dev\n111111111111:Admin")
+    s.tick()
+    (state / "login_ok").unlink()
+    s.tick()
+    st = _status_file(state)
+    assert st["profiles"] == ["222222222222:Dev", "111111111111:Admin"] and st["loaded"] is False
+
+    s2 = sup.Supervisor()
+    s2.setup()
+    s2.server = s.server
+    assert s2.selected == ["222222222222:Dev", "111111111111:Admin"]
+    assert "[profile 111111111111:Admin]" in (tmp / "profiles/config").read_text()
+    (state / "login_ok").touch()
+    n = len(_loads(tmp))
+    s2.tick()
+    assert len(_loads(tmp)) == n + 2 and _status_file(state)["loaded"] is True
+
+
+def test_more_roles_than_the_cap_is_rejected_without_touching_the_selection(sidecar):
+    sup, s, state, tmp = sidecar
+    names = [f"{i:012d}:R" for i in range(sup.MAX_ROLES + 1)]
+    (tmp / "roles.csv").write_text("Profile\n" + "\n".join(names) + "\n")
+    _login(state, s)
+    (state / "req/profiles").write_text("\n".join(names))
+    s.tick()
+    st = _status_file(state)
+    assert st["profiles"] == [] and "No máximo" in st["error"]
+    assert _loads(tmp) == []
+
+
+def test_unknown_profile_is_rejected_by_supervisor(sidecar):
+    _, s, state, tmp = sidecar
+    _login(state, s)
+    (state / "req/profiles").write_text("111111111111:Admin\n999999999999:Nope")
+    s.tick()
+    st = _status_file(state)
+    assert st["profiles"] == [] and "desconhecido" in st["error"]
+    assert not _loads(tmp)
 
 
 def test_single_role_is_selected_automatically(sidecar):
     _, s, state, tmp = sidecar
     (tmp / "roles.csv").write_text("Profile\n111111111111:Admin\n")
-    s.tick()
-    (state / "login_ok").touch()
-    s.tick()
-    assert _status_file(state)["profile"] == "111111111111:Admin"
+    _login(state, s)
+    assert _status_file(state)["profiles"] == ["111111111111:Admin"]
+    assert "[profile 111111111111:Admin]" in (tmp / "profiles/config").read_text()
 
 
 def test_expired_session_drops_login_and_reports_it(sidecar):
@@ -460,25 +625,47 @@ def test_expired_session_drops_login_and_reports_it(sidecar):
     assert not (state / "login_ok").exists()
 
 
-def test_failed_load_is_reported_without_leaking_details(sidecar):
-    _, s, state, tmp = sidecar
-    s.tick()
-    (state / "login_ok").touch()
-    s.tick()
+def test_failed_load_is_reported_without_leaking_details_and_retried_later(sidecar, monkeypatch):
+    sup, s, state, tmp = sidecar
+    _login(state, s)
     (tmp / "load_fail").touch()
-    (state / "req/profile").write_text("111111111111:Admin")
+    (state / "req/profiles").write_text("111111111111:Admin\n222222222222:Dev")
     s.tick()
     st = _status_file(state)
-    assert st["loaded"] is False and "tok-123" not in json.dumps(st)
+    assert st["loaded"] is False and st["loaded_profiles"] == [] and "tok-123" not in json.dumps(st)
     assert st["error"]
+
+    n = len(_loads(tmp))
+    s.tick()  # ainda dentro da janela de espera: nada de martelar o servidor
+    assert len(_loads(tmp)) == n
+
+    (tmp / "load_fail").unlink()
+    monkeypatch.setattr(sup, "RETRY_SECONDS", 0)
+    s.tick()
+    st = _status_file(state)
+    assert st["loaded"] is True and st["error"] == ""
+
+
+def test_one_failing_role_does_not_block_the_others(sidecar):
+    _, s, state, tmp = sidecar
+    _login(state, s)
+    fake = tmp / "aws-sso"
+    fake.write_text(fake.read_text().replace(
+        '"ecs load") [ -f "$FAKE_LOAD_FAIL" ] && exit 1; exit 0 ;;',
+        '"ecs load") case "$*" in *111111111111:Admin*) exit 1 ;; esac; exit 0 ;;',
+    ))
+    (state / "req/profiles").write_text("111111111111:Admin\n222222222222:Dev")
+    s.tick()
+    st = _status_file(state)
+    assert st["loaded_profiles"] == ["222222222222:Dev"] and st["loaded"] is False and st["error"]
 
 
 def test_requests_without_login_are_discarded(sidecar):
     _, s, state, _ = sidecar
-    (state / "req/profile").write_text("111111111111:Admin")
+    (state / "req/profiles").write_text("111111111111:Admin")
     s.tick()
-    assert not (state / "req/profile").exists()
-    assert _status_file(state)["profile"] == ""
+    assert not (state / "req/profiles").exists()
+    assert _status_file(state)["profiles"] == []
 
 
 # --- perfil = <id da conta>:<papel>; nome da conta é só rótulo -----------------
@@ -494,7 +681,7 @@ TRICKY_NAMES = [
 @pytest.mark.parametrize("profile", ["000123456789:AWS-DevSecOps", "111111111111:Admin_Role", "222222222222:a+b=c,d.e@f-g"])
 def test_apply_roles_accepts_account_id_and_role(profile):
     ran: list[str] = []
-    res = AwsSsoExtension().handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": profile})
+    res = AwsSsoExtension().handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profiles": (profile,)})
     assert res.ok and profile in ran[0]
 
 
@@ -515,11 +702,11 @@ def test_apply_roles_accepts_account_id_and_role(profile):
 def test_apply_roles_rejects_anything_but_account_id_and_role(profile):
     ran: list[str] = []
     with pytest.raises(base.ExtensionError):
-        AwsSsoExtension().handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profile": profile})
+        AwsSsoExtension().handle_action(_ctx(lambda s: ran.append(s) or ""), "apply_roles", {"profiles": (profile,)})
     assert ran == []
 
 
-def test_card_shows_readable_account_names_next_to_the_profile_value():
+def test_options_show_readable_account_names_next_to_the_profile_value():
     st = _status(
         {
             "server": True, "logged_in": True, "roles": 2,
@@ -527,16 +714,17 @@ def test_card_shows_readable_account_names_next_to_the_profile_value():
             "role_labels": {"000123456789:AWS-DevSecOps": "EdSaraiva(AdministradorAWS-AMAZON)", "222222222222:Dev": ""},
         }
     )
-    text = " ".join(st.card.messages)
-    assert "000123456789:AWS-DevSecOps (EdSaraiva(AdministradorAWS-AMAZON))" in text
-    assert "222222222222:Dev" in text and "222222222222:Dev (" not in text
+    first, second = st.choices["apply_roles.profiles"]
+    assert first.value == "000123456789:AWS-DevSecOps"
+    assert first.label == "000123456789:AWS-DevSecOps (EdSaraiva(AdministradorAWS-AMAZON))"
+    assert (second.value, second.label) == ("222222222222:Dev", "222222222222:Dev")
 
 
-def test_card_shows_the_account_name_of_the_selected_role():
+def test_card_shows_the_account_name_of_the_active_role():
     st = _status(
         {
-            "server": True, "logged_in": True, "profile": "000123456789:Admin", "loaded": True,
-            "profile_label": "RedaçãoNota1000",
+            "server": True, "logged_in": True, "profiles": ["000123456789:Admin"], "loaded": True,
+            "loaded_profiles": ["000123456789:Admin"], "role_labels": {"000123456789:Admin": "RedaçãoNota1000"},
         }
     )
     assert ("Papel", "000123456789:Admin") in st.card.rows
@@ -548,7 +736,8 @@ def test_card_html_escapes_account_names():
 
     st = _status(
         {
-            "server": True, "logged_in": True, "roles": 1, "role_names": ["111111111111:Admin"],
+            "server": True, "logged_in": True, "profiles": ["111111111111:Admin"], "loaded": True,
+            "loaded_profiles": ["111111111111:Admin"],
             "role_labels": {"111111111111:Admin": "<script>alert(1)</script>"},
         }
     )
@@ -581,11 +770,11 @@ def test_supervisor_publishes_account_names_as_labels_only(sidecar):
     assert st["role_labels"] == dict(rows)
     assert "list --csv Profile AccountName" in _calls(tmp)
 
-    (state / "req/profile").write_text("000123456789:AWS-DevSecOps")
+    (state / "req/profiles").write_text("000123456789:AWS-DevSecOps")
     s.tick()
     st = _status_file(state)
     assert st["profile"] == "000123456789:AWS-DevSecOps" and st["loaded"] is True
-    assert st["profile_label"] == "EdSaraiva(AdministradorAWS-AMAZON)"
+    assert st["role_labels"]["000123456789:AWS-DevSecOps"] == "EdSaraiva(AdministradorAWS-AMAZON)"
     assert "ecs load --profile 000123456789:AWS-DevSecOps --server localhost:4144" in _calls(tmp)
 
 
@@ -595,9 +784,9 @@ def test_supervisor_rejects_old_style_profile_with_account_name(sidecar):
     s.tick()
     (state / "login_ok").touch()
     s.tick()
-    (state / "req/profile").write_text("Plain:Admin")
+    (state / "req/profiles").write_text("Plain:Admin")
     s.tick()
-    assert _status_file(state)["profile"] == ""
+    assert _status_file(state)["profiles"] == []
     assert not any(c.startswith("ecs load") for c in _calls(tmp))
 
 

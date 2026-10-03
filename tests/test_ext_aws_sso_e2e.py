@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import time
 
 import pytest
@@ -200,10 +201,10 @@ def test_follow_up_actions_write_request_files_through_exec(aws_client, sidecar)
     _, s = aws_client
     sidecar.status = {"server": True, "logged_in": True, "roles": 1, "role_names": ["123456789012:Admin"]}
     assert runtime.run_action(s, OWNER, "aws-sso", "refresh_roles", {}).ok
-    assert runtime.run_action(s, OWNER, "aws-sso", "apply_roles", {"profile": "123456789012:Admin"}).ok
+    assert runtime.run_action(s, OWNER, "aws-sso", "apply_roles", {"profiles": ("123456789012:Admin",)}).ok
     joined = "\n".join(sidecar.scripts)
     assert "/state/req/refresh" in joined
-    assert "/state/req/profile" in joined and "123456789012:Admin" in joined
+    assert "/state/req/profiles" in joined and "123456789012:Admin" in joined
 
 
 def _use_real_exec(monkeypatch, fake_clients, stdout):  # noqa: F811
@@ -223,7 +224,7 @@ def test_status_json_written_by_the_supervisor_survives_the_real_exec_path(
     silêncio e o card ficava eternamente em "faça login"."""
     _, s = aws_client
     status = {
-        "ts": 1769800000.5, "server": True, "logged_in": True, "profile": "",
+        "ts": 1769800000.5, "server": True, "logged_in": True, "profiles": [],
         "loaded": False, "roles": 402, "role_names": ["111111111111:Admin"], "error": "",
     }
     _use_real_exec(monkeypatch, fake_clients, json.dumps(status) + "\n")
@@ -231,13 +232,13 @@ def test_status_json_written_by_the_supervisor_survives_the_real_exec_path(
     (view,) = runtime.evaluate(s, OWNER)
     assert view.conditions["sso.server"] and view.conditions["sso.logged_in"]
     assert not view.conditions["sso.creds_loaded"]
-    assert view.card.summary == "Login feito. Escolha o papel que o ambiente deve assumir."
+    assert view.card.summary == "Login feito. Marque os papéis que o ambiente deve assumir."
     assert ("Papéis disponíveis", "402") in view.card.rows
 
 
 def test_ready_status_through_the_real_exec_path(aws_client, monkeypatch, fake_clients):  # noqa: F811
     _, s = aws_client
-    status = {"server": True, "logged_in": True, "profile": "1:Admin", "loaded": True, "error": ""}
+    status = {"server": True, "logged_in": True, "profiles": ["1:Admin"], "loaded_profiles": ["1:Admin"], "loaded": True, "error": ""}
     _use_real_exec(monkeypatch, fake_clients, json.dumps(status))
     (view,) = runtime.evaluate(s, OWNER)
     assert view.state == "ready"
@@ -269,8 +270,9 @@ def test_cards_refresh_by_themselves_after_start_login_until_the_dev_authorizes(
         "server": True, "logged_in": True, "roles": 2, "role_names": ["1:Admin", "2:Dev"],
     }
     choosing = client.get(f"{URL}/extensions/cards")
-    assert "Escolha o papel" in choosing.text
-    assert 'http-equiv="refresh"' not in choosing.text  # o dev está digitando o perfil
+    assert "Marque os papéis" in choosing.text
+    assert choosing.text.count('type="checkbox"') == 2
+    assert 'http-equiv="refresh"' not in choosing.text  # o dev está marcando os papéis
 
 
 @pytest.mark.parametrize(
@@ -279,9 +281,9 @@ def test_cards_refresh_by_themselves_after_start_login_until_the_dev_authorizes(
         ({"server": True, "logged_in": False}, False),  # nada pedido ainda
         ({"server": True, "logged_in": True, "roles": 1, "role_names": ["1:A"]}, True),  # auto-seleção
         ({"server": True, "logged_in": True, "roles": 3}, False),  # dev escolhe
-        ({"server": True, "logged_in": True, "profile": "1:A", "loaded": False}, True),
-        ({"server": True, "logged_in": True, "profile": "1:A", "loaded": False, "error": "boom"}, False),
-        ({"server": True, "logged_in": True, "profile": "1:A", "loaded": True}, False),
+        ({"server": True, "logged_in": True, "profiles": ["1:A"], "loaded": False}, True),
+        ({"server": True, "logged_in": True, "profiles": ["1:A"], "loaded": False, "error": "boom"}, False),
+        ({"server": True, "logged_in": True, "profiles": ["1:A"], "loaded": True}, False),
     ],
 )
 def test_aws_sso_card_polls_only_while_waiting_on_something(aws_client, sidecar, status, polling):
@@ -305,8 +307,31 @@ def test_card_lists_account_names_and_apply_roles_takes_the_account_id(aws_clien
     page = client.get(f"{URL}/extensions/cards").text
     assert "EdSaraiva(AdministradorAWS-AMAZON)" in page and "RedaçãoNota1000" in page
 
-    assert runtime.run_action(s, OWNER, "aws-sso", "apply_roles", {"profile": profile}).ok
+    assert runtime.run_action(s, OWNER, "aws-sso", "apply_roles", {"profiles": (profile,)}).ok
     assert profile in " ".join(sidecar.scripts)
-    assert not runtime.run_action(
-        s, OWNER, "aws-sso", "apply_roles", {"profile": "EdSaraiva(AdministradorAWS-AMAZON):AWS-DevSecOps"}
-    ).ok
+    with pytest.raises(runtime.ActionRejected):
+        runtime.run_action(
+            s, OWNER, "aws-sso", "apply_roles", {"profiles": ("EdSaraiva(AdministradorAWS-AMAZON):AWS-DevSecOps",)}
+        )
+
+
+def test_apply_roles_over_http_takes_several_checked_roles_in_option_order(aws_client, sidecar, login):
+    """O formulário devolve os marcados na ordem das opções; as ativas vêm
+    primeiro, então o padrão atual continua sendo o primeiro."""
+    client, s = aws_client
+    login(client)
+    sidecar.status = {
+        "server": True, "logged_in": True, "roles": 3, "profiles": ["222222222222:Dev"], "loaded": True,
+        "loaded_profiles": ["222222222222:Dev"],
+        "role_names": ["111111111111:Admin", "222222222222:Dev", "333333333333:Ops"],
+    }
+    page = client.get(f"{URL}/extensions/cards").text
+    boxes = re.findall(r'<input type="checkbox"[^>]*>', page)
+    assert [re.search(r'value="([^"]+)"', b).group(1) for b in boxes] == [
+        "222222222222:Dev", "111111111111:Admin", "333333333333:Ops",
+    ]
+    assert "checked" in boxes[0] and "checked" not in boxes[1]
+
+    res = runtime.run_action(s, OWNER, "aws-sso", "apply_roles", {"profiles": ("222222222222:Dev", "333333333333:Ops")})
+    assert res.ok
+    assert "222222222222:Dev\n333333333333:Ops" in "\n".join(sidecar.scripts)
