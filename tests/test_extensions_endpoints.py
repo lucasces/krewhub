@@ -203,6 +203,21 @@ def test_action_with_bearer_returns_json_without_csrf(ext_client, sign_cookie, f
     assert r.status_code == 200 and r.json() == {"ok": True, "message": "logado"}
 
 
+def test_action_collects_repeated_checkbox_fields_into_a_multiselect(ext_client, login, fake_clients):
+    client, s = ext_client
+    enable_demo(s)
+    _ready(fake_clients)
+    login(client)
+    r = client.post(
+        f"{URL}/extensions/demo/actions/pick",
+        data={"csrf": _token(s, "pick"), "items": ["a", "b"]},
+        headers={"accept": "application/json"},
+    )
+    assert r.status_code == 200 and r.json()["message"] == "pick a,b"
+    r = client.post(f"{URL}/extensions/demo/actions/pick", data={"csrf": _token(s, "pick"), "items": "zzz"})
+    assert r.status_code == 400
+
+
 def test_action_rejections_map_to_http_errors(ext_client, login, fake_clients):
     client, s = ext_client
     enable_demo(s)

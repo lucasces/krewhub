@@ -29,14 +29,14 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
-API_VERSION = "1.4"
+API_VERSION = "1.5"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 
 STATES = ("inactive", "pending", "needs_action", "ready", "degraded", "error")
 
-FIELD_KINDS = ("text", "select", "bool", "secret", "generated")
+FIELD_KINDS = ("text", "select", "bool", "secret", "generated", "multiselect")
 
 
 class ExtensionError(Exception):
@@ -57,6 +57,11 @@ class FieldSpec:
       k8s, NUNCA pro SQLite (lá só `{set, updated_at}`).
     - `generated`: gerado pelo KrewHub na primeira vez (token aleatório),
       nunca mostrado nem digitado -- só o Pod consome.
+    - `multiselect`: só em `ActionSpec.params`. Caixas de marcar cujas
+      opções a extensão devolve a cada `status()` em `Status.choices`
+      (`"<ação>.<chave>"`); `handle_action` recebe uma tupla com os valores
+      marcados, todos garantidamente entre as opções oferecidas. `required`
+      exige pelo menos um.
     """
 
     key: str
@@ -77,6 +82,21 @@ class FieldSpec:
             raise ValueError("FieldSpec kind='select' exige options")
         if self.kind in ("secret", "generated") and self.default:
             raise ValueError("campos secret/generated não têm default")
+
+
+@dataclass(frozen=True)
+class Choice:
+    """Opção de um parâmetro `multiselect`: `value` é o que volta ao
+    `handle_action`; `label` é só exibição (escapado pelo renderer);
+    `checked` pré-marca a caixa."""
+
+    value: str
+    label: str = ""
+    checked: bool = False
+
+
+#: valor de um parâmetro de ação: texto, ou tupla de valores se `multiselect`
+ActionParam = str | tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -272,6 +292,8 @@ class Status:
     conditions: dict[str, bool] = field(default_factory=dict)
     card: Card | None = None
     state: str | None = None
+    #: opções dos parâmetros `multiselect` das ações, por `"<ação>.<chave>"`
+    choices: dict[str, tuple[Choice, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -431,7 +453,7 @@ class Extension:
         Pod pronto (o core devolve `pending`/`inactive` antes disso)."""
         return Status(conditions={}, card=Card(title=self.name, state="ready"), state="ready")
 
-    def handle_action(self, ctx: ExtensionContext, action_id: str, params: Mapping[str, str]) -> ActionResult:
+    def handle_action(self, ctx: ExtensionContext, action_id: str, params: Mapping[str, ActionParam]) -> ActionResult:
         raise ExtensionError(f"ação desconhecida: {action_id}")
 
     def lobby_card(self, ctx: ExtensionContext) -> Card | None:
@@ -462,6 +484,9 @@ class Extension:
         keys = [f.key for f in self.fields]
         if len(keys) != len(set(keys)):
             raise ValueError(f"extensão {self.id}: chaves de campo duplicadas")
+        for f in self.fields:
+            if f.kind == "multiselect":
+                raise ValueError(f"extensão {self.id}: multiselect só vale em parâmetros de ação ({f.key})")
         ids = [a.id for a in self.actions]
         if len(ids) != len(set(ids)):
             raise ValueError(f"extensão {self.id}: ids de ação duplicados")
@@ -470,10 +495,12 @@ class Extension:
 __all__ = [
     "API_VERSION",
     "STATES",
+    "ActionParam",
     "ActionResult",
     "ActionSpec",
     "BuildContext",
     "Card",
+    "Choice",
     "Extension",
     "ExtensionContext",
     "ExtensionError",

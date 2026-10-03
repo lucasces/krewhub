@@ -7,11 +7,11 @@ http(s). Extensões devolvem dados (`Card`, `FieldSpec`), nunca markup."""
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 from urllib.parse import quote, urlparse
 
-from app.extensions.base import Card, Extension, FieldSpec
+from app.extensions.base import Card, Choice, Extension, FieldSpec
 
 _STATE_LABEL = {
     "inactive": "desativada",
@@ -53,6 +53,8 @@ class ActionButton:
     enabled: bool
     description: str = ""
     params: tuple[FieldSpec, ...] = ()
+    #: opções dos parâmetros `multiselect`, por chave do parâmetro
+    choices: Mapping[str, tuple[Choice, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -162,14 +164,25 @@ def render_card(owner_id: str, view: CardView, csrf: Callable[[str, str], str]) 
     return "\n".join(parts)
 
 
+def _render_param(p: FieldSpec, choices: Sequence[Choice]) -> str:
+    label = _e(p.label or p.key)
+    if p.kind == "multiselect":
+        if not choices:
+            return f'<p><small>{label}: nenhuma opção disponível.</small></p>'
+        boxes = "".join(
+            f'<label style="display:block"><input type="checkbox" name="{_e(p.key)}" value="{_e(c.value)}"'
+            f'{" checked" if c.checked else ""}> {_e(c.label or c.value)}</label>'
+            for c in choices
+        )
+        return f'<fieldset style="margin:.4rem 0"><legend><small>{label}</small></legend>{boxes}</fieldset>'
+    return f'<label>{label}: <input type="text" name="{_e(p.key)}" value="{_e(p.default)}"></label> '
+
+
 def _render_action(owner_id: str, ext_id: str, a: ActionButton, csrf: Callable[[str, str], str]) -> str:
     action_url = (
         f"/devs/{quote(owner_id, safe='@')}/extensions/{quote(ext_id, safe='')}/actions/{quote(a.id, safe='')}"
     )
-    params = "".join(
-        f'<label>{_e(p.label or p.key)}: <input type="text" name="{_e(p.key)}" value="{_e(p.default)}"></label> '
-        for p in a.params
-    )
+    params = "".join(_render_param(p, a.choices.get(p.key, ())) for p in a.params)
     disabled = "" if a.enabled else " disabled"
     title = f' title="{_e(a.description)}"' if a.description else ""
     return (

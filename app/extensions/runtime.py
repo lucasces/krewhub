@@ -15,7 +15,7 @@ import hmac
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from kubernetes.client.rest import ApiException
 
@@ -24,9 +24,11 @@ from app import k8s_manager, pod_exec, store
 from app import k8s_templates as tpl
 from app.config import Settings
 from app.extensions.base import (
+    ActionParam,
     ActionResult,
     BuildContext,
     Card,
+    Choice,
     Extension,
     ExtensionContext,
     ExtensionError,
@@ -308,7 +310,14 @@ def wants_refresh(views) -> bool:
     return any(v.state == "pending" or v.card.polling for v in views)
 
 
-def _buttons(ext: Extension, conditions: Mapping[str, bool], *, usable: bool) -> tuple[ActionButton, ...]:
+def _buttons(
+    ext: Extension,
+    conditions: Mapping[str, bool],
+    *,
+    usable: bool,
+    choices: Mapping[str, tuple[Choice, ...]] | None = None,
+) -> tuple[ActionButton, ...]:
+    choices = choices or {}
     return tuple(
         ActionButton(
             a.id,
@@ -316,6 +325,7 @@ def _buttons(ext: Extension, conditions: Mapping[str, bool], *, usable: bool) ->
             usable and all(conditions.get(r, False) for r in a.requires),
             a.description,
             a.params,
+            {p.key: tuple(choices.get(f"{a.id}.{p.key}", ())) for p in a.params if p.kind == "multiselect"},
         )
         for a in ext.actions
     )
@@ -380,11 +390,13 @@ def evaluate(
 
         ctx = _make_context(settings, c, owner_id, slug, ext, row, config, snap)
         before = dict(ctx.state)
+        choices: dict[str, tuple[Choice, ...]] = {}
         try:
             status = ext.status(ctx)
             if not isinstance(status, Status):
                 raise TypeError("status() precisa devolver Status")
             conditions = {**base, **status.conditions}
+            choices = status.choices
             state = status.state or _derive(conditions)
             card = ext.lobby_card(ctx) or status.card
             card = card or Card(title=name)
@@ -396,8 +408,8 @@ def evaluate(
             card = Card(title=name, state="error", summary="Falha ao consultar o estado.", messages=(msg,))
         _persist_state(settings, owner_id, ext_id, before, ctx.state)
         views.append(
-            ExtView(ext_id, name, state, conditions, card, _buttons(ext, conditions, usable=True),
-                    _format_last_action(ctx.state))
+            ExtView(ext_id, name, state, conditions, card,
+                    _buttons(ext, conditions, usable=True, choices=choices), _format_last_action(ctx.state))
         )
     return views
 
@@ -416,8 +428,20 @@ class ActionRejected(Exception):
         self.status_code = status_code
 
 
+def _form_values(form: Mapping[str, Any], key: str) -> list[str]:
+    """Valores de `key` num form que pode trazer texto ou lista (campo repetido)."""
+    raw = form.get(key)
+    items = [] if raw is None else [raw] if isinstance(raw, str) else list(raw)
+    values: list[str] = []
+    for item in items:
+        item = str(item).strip()
+        if item and item not in values:
+            values.append(item)
+    return values
+
+
 def run_action(
-    settings: Settings, owner_id: str, ext_id: str, action_id: str, form: Mapping[str, str]
+    settings: Settings, owner_id: str, ext_id: str, action_id: str, form: Mapping[str, str | Sequence[str]]
 ) -> ActionResult:
     exts = registry.enabled_extensions(settings)
     ext = exts.get(ext_id)
@@ -435,9 +459,21 @@ def run_action(
     if button is None or not button.enabled:
         raise ActionRejected("pré-requisitos da ação não atendidos", 409)
 
-    params: dict[str, str] = {}
+    params: dict[str, ActionParam] = {}
     for p in spec.params:
-        value = str(form.get(p.key, p.default)).strip()
+        if p.kind == "multiselect":
+            picked = _form_values(form, p.key)
+            offered = {c.value for c in button.choices.get(p.key, ())}
+            if any(v not in offered for v in picked):
+                raise ActionRejected(f"parâmetro {p.key!r} inválido")
+            if p.required and not picked:
+                raise ActionRejected(f"parâmetro {p.key!r} obrigatório")
+            params[p.key] = tuple(picked)
+            continue
+        raw = form.get(p.key, p.default)
+        if not isinstance(raw, str):
+            raw = raw[0] if raw else p.default
+        value = str(raw).strip()
         if p.kind == "select" and value not in p.options:
             raise ActionRejected(f"parâmetro {p.key!r} inválido")
         if p.required and not value:

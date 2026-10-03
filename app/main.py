@@ -857,6 +857,23 @@ async def _form_fields(request: Request) -> dict[str, str]:
     return {k: v for k, v in form.items() if isinstance(v, str)}
 
 
+async def _form_fields_multi(request: Request) -> dict[str, str | list[str]]:
+    """Como `_form_fields`, mas campo repetido (checkboxes de mesmo `name`)
+    vira lista -- usado pelos parâmetros `multiselect` das ações."""
+    form = await request.form()
+    fields: dict[str, str | list[str]] = {}
+    for key, value in form.multi_items():
+        if not isinstance(value, str):
+            continue
+        if key not in fields:
+            fields[key] = value
+        elif isinstance(fields[key], list):
+            fields[key].append(value)
+        else:
+            fields[key] = [fields[key], value]
+    return fields
+
+
 def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = None) -> str:
     """Seção "Extensões" do form do lobby: uma caixa por extensão
     habilitada pelo admin (vazio se nenhuma). Valores de campos `secret`
@@ -1207,7 +1224,7 @@ def extension_action(
     ext_id: str,
     action_id: str,
     request: Request,
-    form_fields: dict[str, str] = Depends(_form_fields),
+    form_fields: dict[str, str | list[str]] = Depends(_form_fields_multi),
     _owner: str = Depends(require_owner),
 ):
     """Executa uma ação declarada pela extensão. Browser (cookie de
@@ -1218,7 +1235,7 @@ def extension_action(
     JSON."""
     bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
     if not bearer and not ext_runtime.verify_csrf(
-        _settings.session_secret, form_fields.get("csrf", ""), owner_id, ext_id, action_id
+        _settings.session_secret, str(form_fields.get("csrf", "")), owner_id, ext_id, action_id
     ):
         raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
     try:

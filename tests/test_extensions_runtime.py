@@ -137,7 +137,7 @@ def test_evaluate_needs_action_then_ready(ext_settings, ready_pod):
     (v,) = runtime.evaluate(ext_settings, OWNER, c=ready_pod)
     assert v.state == "needs_action"
     assert v.conditions == {"pod.ready": True, "sidecar.demo.running": True, "demo.authenticated": False}
-    assert {a.id: a.enabled for a in v.actions} == {"login": True, "sync": False}
+    assert {a.id: a.enabled for a in v.actions} == {"login": True, "sync": False, "pick": True}
     with store.connect(ext_settings.db_path) as conn:
         store.upsert_extension(conn, OWNER, "demo", runtime_state={"authed": True})
     (v,) = runtime.evaluate(ext_settings, OWNER, c=ready_pod)
@@ -194,6 +194,38 @@ def test_run_action_validates_params(ext_settings, ready_pod):
     with pytest.raises(runtime.ActionRejected, match="scope"):
         runtime.run_action(ext_settings, OWNER, "demo", "sync", {"scope": "z"})
     assert runtime.run_action(ext_settings, OWNER, "demo", "sync", {"scope": "y"}).message == "sync y"
+
+
+def test_evaluate_exposes_multiselect_choices_on_the_button(ext_settings, ready_pod):
+    enable_demo(ext_settings)
+    (v,) = runtime.evaluate(ext_settings, OWNER, c=ready_pod)
+    pick = next(a for a in v.actions if a.id == "pick")
+    assert [(c.value, c.checked) for c in pick.choices["items"]] == [("a", True), ("b", False)]
+    assert next(a for a in v.actions if a.id == "sync").choices == {}
+
+
+def test_run_action_multiselect_passes_a_tuple_of_offered_values(ext_settings, ready_pod):
+    enable_demo(ext_settings)
+    run = lambda form: runtime.run_action(ext_settings, OWNER, "demo", "pick", form)  # noqa: E731
+    assert run({"items": ["b", "a", "b", " "]}).message == "pick b,a"
+    assert run({"items": "a"}).message == "pick a"
+
+
+def test_run_action_multiselect_rejects_unoffered_and_empty(ext_settings, ready_pod):
+    enable_demo(ext_settings)
+    with pytest.raises(runtime.ActionRejected, match="items"):
+        runtime.run_action(ext_settings, OWNER, "demo", "pick", {"items": ["a", "z"]})
+    with pytest.raises(runtime.ActionRejected, match="obrigatório"):
+        runtime.run_action(ext_settings, OWNER, "demo", "pick", {})
+
+
+def test_multiselect_is_rejected_as_a_config_field():
+    class Bad(extensions.base.Extension):
+        id = "bad"
+        fields = (extensions.base.FieldSpec("x", kind="multiselect"),)
+
+    with pytest.raises(ValueError, match="multiselect"):
+        Bad().check_definition()
 
 
 def test_run_action_hides_internal_errors(settings, demo_installed, ready_pod):
@@ -281,6 +313,28 @@ def test_config_section_never_prefills_secret_and_escapes(ext_settings):
     assert 'value="" placeholder="já definido' in out
     assert 'name="ext.demo.enabled" checked' in out
     assert ui.render_config_section([]) == ""
+
+
+def test_multiselect_param_renders_escaped_checkboxes():
+    base = extensions.base
+    spec = base.FieldSpec("items", "Itens<", kind="multiselect")
+    choices = {"items": (base.Choice('a"x', "Alfa<script>", checked=True), base.Choice("b"))}
+    out = ui.render_card(
+        "a@b.c",
+        ui.CardView("demo", "Demo", "ready", base.Card(title="t"),
+                    (ui.ActionButton("pick", "Ok", True, params=(spec,), choices=choices),)),
+        lambda e, a: "T",
+    )
+    assert '<input type="checkbox" name="items" value="a&quot;x" checked> Alfa&lt;script&gt;' in out
+    assert 'name="items" value="b"> b' in out
+    assert "<script>" not in out and "Itens&lt;" in out
+    empty = ui.render_card(
+        "a@b.c",
+        ui.CardView("demo", "Demo", "ready", base.Card(title="t"),
+                    (ui.ActionButton("pick", "Ok", True, params=(spec,)),)),
+        lambda e, a: "T",
+    )
+    assert "nenhuma opção disponível" in empty and 'type="checkbox"' not in empty
 
 
 def test_card_rendering_escapes_and_filters_links():

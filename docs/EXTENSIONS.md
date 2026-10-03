@@ -20,6 +20,8 @@ and has two parts.
   (created by KrewHub on first use, never shown).
 - `actions` — buttons on the card, each with `requires` (condition names
   that must be true for the button to be enabled) and optional `params`.
+  A parameter of kind `multiselect` renders a group of checkboxes; see
+  [Cards and forms](#cards-and-forms).
 - `pod_contribution(ctx)` — a `PodContribution` merged into the Pod:
   sidecar containers, volumes, mounts, env for the main container, files
   rendered into a ConfigMap, [binaries](#tools-and-skills-in-the-main-container)
@@ -77,6 +79,17 @@ hour) and receive a redirect back to the cards; clients that authenticate
 with `Authorization: Bearer` get JSON and need no token.
 `GET /devs/{owner_id}/extensions` returns the state of all extensions as
 JSON.
+
+**Multi-select parameters.** An action parameter of kind `multiselect`
+(valid only in `ActionSpec.params`) is rendered as checkboxes. The options
+are dynamic, so the extension returns them from `status()` in
+`Status.choices`, keyed `"<action id>.<param key>"`, as `Choice(value,
+label, checked)` tuples; `checked` pre-marks a box, so a form can show the
+current selection. `handle_action` receives the checked values as a tuple
+in `params`. The core rejects the request (HTTP 400) when a value is not
+among the options offered by the last `status()` call or, for a `required`
+parameter, when none is checked. Labels are HTML-escaped like any other
+extension text.
 
 ## Installing and enabling
 

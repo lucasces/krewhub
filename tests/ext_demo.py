@@ -28,6 +28,8 @@ class DemoExtension(base.Extension):
         base.ActionSpec("login", "Entrar", requires=("pod.ready",)),
         base.ActionSpec("sync", "Sincronizar", requires=("demo.authenticated",),
                         params=(base.FieldSpec("scope", "Escopo", kind="select", options=("x", "y"), default="x"),)),
+        base.ActionSpec("pick", "Escolher", requires=("pod.ready",),
+                        params=(base.FieldSpec("items", "Itens", kind="multiselect", required=True),)),
     )
 
     def pod_contribution(self, ctx):
@@ -41,6 +43,7 @@ class DemoExtension(base.Extension):
         return base.Status(
             conditions={"demo.authenticated": authed},
             card=base.Card(title="Demo", summary="logado" if authed else "sem login", code=ctx.state.get("code", "")),
+            choices={"pick.items": (base.Choice("a", "Alfa<", checked=True), base.Choice("b", "Beta"))},
         )
 
     def handle_action(self, ctx, action_id, params):
@@ -48,6 +51,8 @@ class DemoExtension(base.Extension):
             return base.ActionResult(ok=True, message="logado", state_updates={"authed": True})
         if action_id == "sync":
             return base.ActionResult(ok=True, message=f"sync {params['scope']}")
+        if action_id == "pick":
+            return base.ActionResult(ok=True, message="pick " + ",".join(params["items"]))
         return super().handle_action(ctx, action_id, params)
 
 
