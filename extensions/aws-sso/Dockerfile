@@ -1,7 +1,7 @@
 # Imagem da extensão AWS SSO do KrewHub, usada em dois papéis do mesmo Pod:
 # sidecar (aws-sso-cli + supervisor) e initContainer `aws-sso-tools`, que
-# copia o AWS CLI v2 e a skill do agente (/opt/krewhub-tools) pro volume lido
-# pelo `kirocrew`.
+# copia o AWS CLI v2, o helper `credential_process` e a skill do agente
+# (/opt/krewhub-tools) pro volume lido pelo `kirocrew`.
 # Build (a partir de extensions/aws-sso/):
 #   docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/krewhub-ext-aws-sso:<tag> .
 FROM debian:bookworm-slim AS fetch
@@ -52,7 +52,8 @@ FROM python:3.12-slim-bookworm
 COPY --from=fetch /aws-sso /usr/local/bin/aws-sso
 COPY --from=awscli /out /opt/krewhub-tools
 COPY skills /opt/krewhub-tools/skills
+COPY credential_process.py /opt/krewhub-tools/bin/krewhub-aws-sso-creds
 COPY supervisor.py /usr/local/bin/krewhub-aws-sso-supervisor
-RUN chmod 0755 /usr/local/bin/krewhub-aws-sso-supervisor
+RUN chmod 0755 /usr/local/bin/krewhub-aws-sso-supervisor /opt/krewhub-tools/bin/krewhub-aws-sso-creds
 USER 1000:1000
 ENTRYPOINT ["python3", "/usr/local/bin/krewhub-aws-sso-supervisor"]
