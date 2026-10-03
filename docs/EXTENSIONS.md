@@ -259,9 +259,9 @@ the image tag changes the spec hash and recreates the Pod.
 
 ## AWS SSO (`aws-sso`)
 
-Gives the workspace AWS credentials from IAM Identity Center. Any AWS
-SDK or CLI in the main container picks them up automatically, with no
-profile or login inside the workspace.
+Gives the workspace AWS credentials from IAM Identity Center, for one or
+more roles at the same time. Any AWS SDK or CLI in the main container
+picks them up automatically, with no login inside the workspace.
 
 **Lobby fields.** `start_url` (the `*.awsapps.com` Identity Center
 start URL, required), `sso_region` (required) and `default_region`
@@ -285,8 +285,10 @@ start URL, required), `sso_region` (required) and `default_region`
   and shows the verification link and code on the card. Once the
   developer authorizes in the browser, the supervisor lists the roles;
   with a single role it is selected automatically, otherwise the
-  developer picks one with `apply_roles`. `refresh_roles` re-reads the
-  available roles and `reload_creds` refreshes the credentials.
+  developer ticks the roles to use in the `apply_roles` form (a
+  [multi-select parameter](#multi-select-parameters)).
+  `refresh_roles` re-reads the available roles and `reload_creds`
+  refreshes the credentials of every active role.
 - Roles are identified by `<12-digit account id>:<role name>` (for
   example `000123456789:AdministratorAccess`). The generated
   `config.yaml` sets `ProfileFormat` to `{{ .AccountIdPad }}:{{ .RoleName }}`
@@ -296,16 +298,48 @@ start URL, required), `sso_region` (required) and `default_region`
   profile as a label, so the developer still sees which account is which,
   but the name is never used as a value.
 
+**Multiple roles.** `apply_roles` takes the *desired set* of active roles
+(at most 10): each submission replaces the previous set instead of adding
+to it, and the form shows the current roles first, ticked.
+
+- The first role of the set is the **default**: the supervisor loads it
+  without a slot, so it is served on the endpoint the SDKs already use
+  (`/`) and plain `aws` commands run as that role. The card marks it
+  "(padrão)" when more than one role is active.
+- Every active role also gets a named profile `<account id>:<role name>`
+  in a managed AWS config file. The supervisor writes it into an
+  `emptyDir` that only the sidecar can write and the main container
+  mounts read-only (`/etc/krewhub/aws-sso/config`, exported as
+  `AWS_CONFIG_FILE`). Each profile uses a `credential_process`, a small
+  standard-library Python helper (`krewhub-aws-sso-creds`, shipped in the
+  tools volume) that reads the role's slot (`/slot/<profile>`) from the
+  local credential server with the bearer token. `aws configure
+  list-profiles` lists the active roles; `--profile <name>` or
+  `AWS_PROFILE` selects one.
+- The supervisor keeps one slot per non-default role, reloads all of
+  them in its regular refresh cycle (and on `reload_creds`), retries a
+  failed load every 30 seconds, and removes the slots of roles that were
+  unticked. The card flags a role whose credentials are not loaded.
+- The selection is kept in the sidecar's private state, so it survives a
+  supervisor restart and a new login.
+
+**`~/.aws/config` is not read while the extension is active.** The AWS
+CLI reads one config file, the one `AWS_CONFIG_FILE` names; it does not
+merge it with `~/.aws/config`. To use a personal config in the
+workspace, export another `AWS_CONFIG_FILE` in the shell. The managed
+profiles then disappear from that shell, but the default role still
+works, because it does not depend on the config file.
+
 - The main container gets the [AWS CLI v2](https://docs.aws.amazon.com/cli/)
   through the `tools` contribution (`aws` on `PATH`; the init container
   copies it out of the extension image) and the skill `aws-sso`, which
   ships in the same image (`extensions/aws-sso/skills/aws-sso/SKILL.md`)
   and is delivered by the same init container. The skill
-  tells the agent that credentials come from the container-credentials
-  endpoint with no profiles, to confirm the active role with
-  `aws sts get-caller-identity`, to ask before changing resources, and to
-  send the developer to the lobby card when credentials are missing or
-  expired. One role is active at a time, so the skill does not list roles.
+  tells the agent how the default role and the named profiles work, to
+  list them with `aws configure list-profiles`, to confirm the role with
+  `aws sts get-caller-identity`, to ask before changing resources, never
+  to run `aws sso login` or `aws configure`, and to send the developer to
+  the lobby card when credentials are missing or expired.
 
 **Image.** The extension image is built from `extensions/aws-sso/` with
 `aws-sso-cli` and the AWS CLI v2 pinned by version and SHA-256 (the CLI per
@@ -333,12 +367,18 @@ krewhubCentral:
   it; adjust it with the Pod overlay.
 - **Tools are copied per Pod.** The AWS CLI occupies about 275 MB of node
   ephemeral storage per workspace and is copied at every Pod start.
-- **The `aws-sso` device-code login is not validated on a real cluster.**
-  The code assumes `aws-sso login --url-action print` runs through the
-  same pseudo-terminal driver as the Kiro login and prints the
-  verification URL and a `XXXX-XXXX` code on its output. The parsing is
-  tested against a representative log, not against the real binary's
-  output without a TTY.
+- **Changing the default role means unticking it first.** The form
+  returns the ticked roles in the order of the options, with the active
+  roles first, so a newly ticked role never precedes the current default.
+  Untick the default (the next active role becomes the default) or
+  untick everything and tick the roles again in the wanted order.
+- **Only the first 300 roles are offered.** The supervisor publishes at
+  most 300 role names to the card; roles beyond that are not selectable.
+- **The default role's credentials stay served until replaced.** Slots of
+  unticked roles are deleted from the credential server, but
+  `aws-sso-cli` 2.3.2 cannot clear the default endpoint (deleting it
+  makes the server fail on the next read), so it is only replaced by the
+  next default.
 - **The bearer token is visible inside the Pod.** It is passed to
   `aws-sso setup ecs auth --bearer-token` and so appears in the
   sidecar's process arguments, and it is an environment variable of the

@@ -83,6 +83,13 @@ generic/empty).
   (`ToolsSpec.skills`, content from the extension image). A pod `env` `PATH` replaces the image's `PATH`
   entirely, so `app/extensions/contributions.py` builds it from a fixed
   Debian default (`DEFAULT_MAIN_PATH`) plus the extensions' tool dirs.
+- `aws-sso` serves several roles at once: the first is the unslotted
+  default on `/`, the others are named slots (`/slot/<profile>`) exposed
+  to the main container as `credential_process` profiles in a managed
+  `AWS_CONFIG_FILE`. With `aws-sso-cli` 2.3.2, `aws-sso ecs unload`
+  panics and `DELETE /` on the default slot crashes the server on the
+  next read, so the supervisor removes slots with `DELETE /slot/<name>`
+  over HTTP and never deletes the default. See `docs/EXTENSIONS.md`.
 
 - The CHP API uses the header `Authorization: token <value>` (not
   `Bearer`) — `app/chp_client.py`. `Bearer` is the format for KrewHub's
