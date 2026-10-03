@@ -23,10 +23,12 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
-  # Secret (kiro-owner-id-<slug>) e PVC (kiro-workspace-<slug>): SEM
-  # "delete" de proposito -- teardown_dev_workload nunca apaga nenhum
-  # dos dois (preserva workspace/identidade do dev entre /close e
-  # reprovisionamento). Mesma garantia ja documentada no GitOps do
+  # Secret (kiro-owner-id-<slug>, krewhub-ext-<slug> das extensoes) e PVC
+  # (kiro-workspace-<slug>): SEM "delete" de proposito --
+  # teardown_dev_workload nunca apaga nenhum dos dois (preserva
+  # workspace/identidade do dev entre /close e reprovisionamento; as
+  # chaves do Secret das extensoes saem via merge patch com null no
+  # /logout e /close). Mesma garantia ja documentada no GitOps do
   # homelab, reforcada aqui em profundidade pelo proprio RBAC.
   - apiGroups: [""]
     resources: ["secrets", "persistentvolumeclaims"]

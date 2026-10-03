@@ -327,6 +327,11 @@ def test_build_pod_overlay_reproduces_the_old_hardcoded_node_affinity():
     # overlay so ACRESCENTA o campo `affinity`, nao toca em mais nada.
     baseline = tpl.build_pod("krewhub-devs", slug, _settings())
     baseline["spec"]["affinity"] = pod["spec"]["affinity"]
+    # O hash do spec acompanha o overlay (spec diferente => hash diferente).
+    assert pod["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION] != (
+        baseline["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION]
+    )
+    baseline["metadata"]["annotations"] = pod["metadata"]["annotations"]
     assert pod == baseline
 
 

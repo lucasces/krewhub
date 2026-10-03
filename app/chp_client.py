@@ -19,8 +19,7 @@ from __future__ import annotations
 import json
 import logging
 
-from kubernetes.stream import stream
-
+from app import pod_exec
 from app.k8s_manager import Clients
 
 logger = logging.getLogger("krewhub.chp")
@@ -38,17 +37,7 @@ def _find_chp_pod(c: Clients, chp_namespace: str, pod_label: str) -> str:
 
 
 def _exec_curl(c: Clients, chp_namespace: str, pod_name: str, curl_cmd: str) -> str:
-    command = ["sh", "-c", curl_cmd]
-    return stream(
-        c.core.connect_get_namespaced_pod_exec,
-        pod_name,
-        chp_namespace,
-        command=command,
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-    )
+    return pod_exec.exec_command(c, pod_name, chp_namespace, ["sh", "-c", curl_cmd], container=None)
 
 
 def register_route(c: Clients, settings, *, host: str, target: str) -> dict:

@@ -126,6 +126,17 @@ spec:
             - name: KREWHUB_CHP_ADMIN_PORT
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.krewhubCentral.extensions.enabled }}
+            # Extensões habilitadas pelo admin (ids separados por vírgula,
+            # KREWHUB_EXTENSIONS_ENABLED) -- ver docs/EXTENSIONS.md. Só as
+            # instaladas na imagem E listadas aqui ficam disponíveis.
+            - name: KREWHUB_EXTENSIONS_ENABLED
+              value: {{ . | quote }}
+            {{- end }}
+            {{- range $name, $value := .Values.krewhubCentral.extensions.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
             {{- if .Values.krewhubCentral.devPodOverlay }}
             # Overlay JSON Patch (RFC 6902) por-cluster (ver app/overlay.py
             # e templates/dev-pod-overlay-configmap.yaml) -- só presente

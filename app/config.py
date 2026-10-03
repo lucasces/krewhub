@@ -63,6 +63,9 @@ class Settings:
     self_host: str
     self_port: int
 
+    # --- extensões (ids instalados que o admin habilita; ver docs/EXTENSIONS.md) ---
+    extensions_enabled: str = ""
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -95,4 +98,5 @@ def load_settings() -> Settings:
         kiro_region=_env("KREWHUB_KIRO_REGION"),
         self_host=_env("KREWHUB_SELF_HOST"),
         self_port=int(_env("KREWHUB_SELF_PORT", "8080")),
+        extensions_enabled=_env("KREWHUB_EXTENSIONS_ENABLED"),
     )
