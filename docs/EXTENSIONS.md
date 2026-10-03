@@ -3,8 +3,10 @@
 An extension adds an optional capability to every developer workspace —
 extra containers in the dev Pod, configuration files, environment
 variables, credentials the developer provides, and a status card in the
-lobby with actions. The first extension, `aws-sso`, gives the workspace
-AWS credentials obtained through IAM Identity Center. The model is
+lobby with actions. Two extensions ship in this repository: `aws-sso`
+gives the workspace AWS credentials obtained through IAM Identity Center
+(sidecar, tools image, interactive login), and `github` gives `git` access
+to GitHub over HTTPS with a token (no sidecar, no image). The model is
 generic: KrewHub core has no knowledge of any specific extension.
 
 ## Model
@@ -124,13 +126,14 @@ the application's virtual environment through a build argument:
 docker build \
   --build-arg KREWHUB_EXTENSIONS="krewhub-ext-aws-sso==0.1.0" .
 # or, from the monorepo checkout:
-docker build --build-arg KREWHUB_EXTENSIONS="./extensions/aws-sso" .
+docker build \
+  --build-arg KREWHUB_EXTENSIONS="./extensions/aws-sso ./extensions/github" .
 ```
 
 The argument is a space-separated list of pip requirements. For local
-development the repository lists `krewhub-ext-aws-sso` as an editable
-path dependency in the `dev` dependency group, so `uv run pytest`
-exercises the real entry point.
+development the repository lists `krewhub-ext-aws-sso` and
+`krewhub-ext-github` as editable path dependencies in the `dev`
+dependency group, so `uv run pytest` exercises the real entry points.
 
 ### Supply-chain risk
 
@@ -152,6 +155,15 @@ whether a secret is set and when, never its value.
   submitted; leaving the field blank keeps the existing value.
 - `generated` fields are created on first use and never rotated.
 - Disabling an extension removes its keys.
+- **Rotation does not recreate the Pod.** The spec hash covers the spec
+  and the contributed files, never secret values. A secret exposed as an
+  environment variable (`secret_env`, i.e. `secretKeyRef`) is read only
+  when the container starts, so a changed value reaches the Pod at its
+  next restart. A secret mounted as a file through an extension-owned
+  `secret` volume is refreshed in place by the kubelet (about a minute),
+  so a program that reads the file on demand sees the new value without a
+  restart. Prefer the file when the credential can change while the Pod
+  runs (the `github` extension does).
 - `/close` removes the `generated` keys of every extension.
 - `/logout` removes **all** extension keys.
 
@@ -250,6 +262,11 @@ the image tag changes the spec hash and recreates the Pod.
   readiness probe.
 - The root filesystem is read-only; mount an `emptyDir` wherever the
   sidecar writes.
+- Pick how a secret reaches the container: `secret_env` for values read
+  once at start-up, an own `secret` volume (with `items` and
+  `optional: true`) for values that must follow rotation. Mounts of the
+  `files` ConfigMap use `subPath` and are static: changing their content
+  changes the hash and recreates the Pod.
 - Never put a secret in a card, a log line or an exception message that
   can reach `ActionResult.message`.
 - Test the extension with the same fixtures the repository uses: fake
@@ -360,6 +377,50 @@ krewhubCentral:
       KREWHUB_EXT_AWS_SSO_IMAGE: "ghcr.io/example/krewhub-ext-aws-sso:0.1.0"
 ```
 
+## GitHub (`github`)
+
+Gives `git` access to GitHub (or GitHub Enterprise Server) over HTTPS
+with a personal access token. It is the minimal shape of an extension:
+declarative only, with no sidecar, no tools and no image of its own.
+
+**Fields.** `token` (secret, required; use a fine-grained token limited to
+the repositories the developer needs) and `host` (default `github.com`; a
+host name with an optional port, validated by a strict pattern because it
+is written into a configuration file).
+
+**What the Pod gets.**
+
+- An extension-owned `secret` volume exposes the token as the read-only
+  file `/etc/krewhub/github/token`. It is `optional`, so the Pod starts
+  even if the token has not been saved yet.
+- `/etc/gitconfig`, mounted from the extension's files ConfigMap, holds a
+  `credential` section for `https://<host>` whose helper reads that file at
+  every git operation and answers only `get` requests. If the file is
+  missing or empty the helper prints nothing and git falls back to its own
+  prompt. The token is never written to the configuration.
+- No environment variable carries the token, so it does not show up in
+  `env`, `/proc/<pid>/environ` of other processes or `kubectl describe`.
+
+**Rotation.** Saving a new token in the lobby patches the Secret; the
+kubelet refreshes the mounted file within about a minute and the next git
+operation uses it. The Pod is not recreated. Changing `host` changes the
+rendered `/etc/gitconfig`, hence the spec hash, and recreates the Pod.
+
+The card is `ready` whenever the extension is enabled and has no actions;
+whether the token is valid is only known to GitHub when git uses it.
+
+### Comparison
+
+| | `aws-sso` | `github` |
+|---|---|---|
+| Containers | sidecar + init container | none |
+| Image | `krewhub-ext-aws-sso` | none |
+| Credential source | interactive login in the lobby | token typed in the lobby |
+| Secret delivery | `generated` bearer token as an environment variable | `secret` field as a mounted file |
+| Pod files | skill and a managed AWS config | `/etc/gitconfig` |
+| Actions | login, role selection, reload | none |
+| Rotation | not applicable (short-lived, refreshed by the sidecar) | kubelet refresh, no Pod restart |
+
 ## Known limitations
 
 - **The tool directories are prepended to a fixed default `PATH`.** If a
@@ -386,3 +447,19 @@ krewhubCentral:
   the loopback credential server.
 - **The credential server speaks plain HTTP on loopback.** `aws-sso`'s
   TLS mode is disabled; traffic never leaves the Pod network namespace.
+- **`github`: a rotated token takes up to about a minute to arrive.** The
+  kubelet refreshes mounted Secret volumes periodically; git operations
+  started before that still use the old token.
+- **`github`: only HTTPS remotes are covered.** SSH remotes are not
+  configured, and one token serves one host.
+- **`github`: the developer's own `~/.gitconfig` still applies.** Git
+  consults credential helpers in configuration order, system file first,
+  so this helper answers before one set in the user's configuration; a
+  `helper =` line with an empty value in `~/.gitconfig` resets the list
+  and disables it.
+- **`github`: `/etc/gitconfig` is replaced, not merged.** It is mounted
+  with `subPath`, so a file of the same name in the base image would be
+  hidden. The current `kirocrew` image does not ship one.
+- **The token is readable inside the Pod.** Anything running in the
+  workspace as the same user can read `/etc/krewhub/github/token`; that is
+  inherent to letting `git` use it.

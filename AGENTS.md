@@ -90,6 +90,13 @@ generic/empty).
   panics and `DELETE /` on the default slot crashes the server on the
   next read, so the supervisor removes slots with `DELETE /slot/<name>`
   over HTTP and never deletes the default. See `docs/EXTENSIONS.md`.
+- Secret rotation never recreates a Pod: `spec_hash` covers the spec and
+  the contributed files, not secret values, and `secretKeyRef` env vars are
+  read only at container start. An extension whose credential must follow
+  rotation mounts it as a file through its own `secret` volume (the kubelet
+  refreshes it in about a minute), as `github` does with a credential
+  helper reading `/etc/krewhub/github/token`. `subPath` mounts, such as the
+  files ConfigMap, never refresh.
 
 - The CHP API uses the header `Authorization: token <value>` (not
   `Bearer`) — `app/chp_client.py`. `Bearer` is the format for KrewHub's

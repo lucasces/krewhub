@@ -31,7 +31,7 @@ COPY app/ ./app/
 # Extensoes (pacotes pip que publicam o entry point `krewhub.extensions`,
 # ver docs/EXTENSIONS.md) entram na MESMA venv, pinadas pelo admin neste
 # build arg -- lista de requirements separada por espaco, ex.:
-#   --build-arg KREWHUB_EXTENSIONS="./extensions/aws-sso"
+#   --build-arg KREWHUB_EXTENSIONS="./extensions/aws-sso ./extensions/github"
 #   --build-arg KREWHUB_EXTENSIONS="krewhub-ext-aws-sso==0.1.0"
 # O codigo delas roda DENTRO do krewhub-central (que tem pods/exec nos Pods
 # dos devs): so instale o que voce auditou, sempre com versao exata.
