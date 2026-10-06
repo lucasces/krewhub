@@ -32,6 +32,10 @@ treated as a release candidate. `release.yml`:
   `1.2.3-rc.1` (no `latest` tag — RCs never move `latest`).
 - Packages the chart with `version`/`appVersion` set to `1.2.3-rc.1` and
   pushes it to `oci://ghcr.io/<owner>/charts`.
+- Also pushes a test image of `krewhub-central` with the in-tree
+  extensions (`aws-sso`, `github`) installed, tagged
+  `aws-sso-github-test-1.2.3-rc.1`, for trying extensions on a cluster.
+  Stable tags never publish it.
 - Publishing starts immediately once CI passes — no approval step.
 
 ## Promoting to a stable release
