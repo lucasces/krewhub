@@ -13,6 +13,14 @@ from app.extensions import base
 from tests.test_k8s_manager import fake_clients  # noqa: F401
 
 
+def lobby_data(data: dict | None = None, owner: str = "dev-a@test.local") -> dict:
+    """Campos do form do lobby + o token anti-CSRF que o browser mandaria
+    (assinado com o `session_secret` vigente do app sob teste)."""
+    import app.main as main
+
+    return {**(data or {}), "csrf": main._lobby_csrf(owner)}
+
+
 class DemoExtension(base.Extension):
     id = "demo"
     name = "Demo"

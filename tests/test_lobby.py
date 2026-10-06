@@ -11,6 +11,7 @@ import pytest
 
 from app import chp_client, k8s_manager, kiro_login, session_client, store
 from app.k8s_templates import host_for, slugify
+from tests.ext_demo import lobby_data
 
 
 @pytest.fixture
@@ -151,19 +152,19 @@ def test_post_lobby_without_login_mode_is_422(client, mocked_infra, sign_cookie)
     por isso lá "ausente" e "inválido" dão os dois 400. Documentando a
     diferença real, não escondendo atrás de um teste ajustado às cegas."""
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({}))
     assert r.status_code == 422
 
 
 def test_post_lobby_invalid_login_mode_is_400(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "bogus"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "bogus"}))
     assert r.status_code == 400
 
 
 def test_post_lobby_org_without_identity_provider_or_region_is_400(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "org"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "org"}))
     assert r.status_code == 400
     assert "identity_provider" in r.json()["detail"]
 
@@ -172,11 +173,13 @@ def test_post_lobby_org_with_form_values_succeeds_and_persists(client, mocked_in
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
     r = client.post(
         "/devs/dev-a%40test.local/lobby",
-        data={
-            "login_mode": "org",
-            "identity_provider": "https://form-value.example/start",
-            "region": "form-region-1",
-        },
+        data=lobby_data(
+            {
+                "login_mode": "org",
+                "identity_provider": "https://form-value.example/start",
+                "region": "form-region-1",
+            }
+        ),
     )
     assert r.status_code == 200
     call = mocked_infra["kiro_login"][0]
@@ -195,7 +198,9 @@ def test_post_lobby_personal_ignores_identity_provider_and_region_even_if_sent(c
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
     r = client.post(
         "/devs/dev-a%40test.local/lobby",
-        data={"login_mode": "personal", "identity_provider": "should-be-ignored", "region": "should-be-ignored"},
+        data=lobby_data(
+            {"login_mode": "personal", "identity_provider": "should-be-ignored", "region": "should-be-ignored"}
+        ),
     )
     assert r.status_code == 200
     call = mocked_infra["kiro_login"][0]
@@ -205,13 +210,13 @@ def test_post_lobby_personal_ignores_identity_provider_and_region_even_if_sent(c
 
 
 def test_post_lobby_requires_auth(client, mocked_infra):
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 401
 
 
 def test_post_lobby_rejects_cross_owner(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-b@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 403
 
 
@@ -222,7 +227,7 @@ def test_post_lobby_rejects_cross_owner(client, mocked_infra, sign_cookie):
 
 def test_result_page_has_reconfigure_close_and_logout_links(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 200
     assert 'href="/devs/dev-a@test.local/lobby?reconfigure=1"' in r.text
     assert 'href="/close"' in r.text
@@ -239,13 +244,13 @@ def test_result_page_shows_already_logged_in_message(client, mocked_infra, sign_
         lambda *_a, **_kw: {"already_logged_in": True, "whoami": "logged in as dev-a"},
     )
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 200
     assert "já está logado" in r.text or "ja esta logado" in r.text.lower()
 
 
 def test_result_page_shows_device_flow_link_when_not_logged_in(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert "https://idp.test/device" in r.text
     assert "WXYZ-0001" in r.text

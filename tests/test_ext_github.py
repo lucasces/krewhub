@@ -22,7 +22,7 @@ from krewhub_ext_github import (
     GithubExtension,
     render_gitconfig,
 )
-from tests.ext_demo import fake_clients, pod  # noqa: F401
+from tests.ext_demo import fake_clients, lobby_data, pod  # noqa: F401
 from tests.test_close_logout import mocked_revoke, mocked_teardown, provisioned  # noqa: F401
 from tests.test_k8s_manager import _settings
 
@@ -240,7 +240,7 @@ def test_lobby_shows_a_write_only_token_field_and_the_host(gh_client):
 
 def test_saving_the_form_sends_the_token_only_to_the_k8s_secret(gh_client, fake_clients):  # noqa: F811
     client, s, plans = gh_client
-    r = client.post(f"{URL}/lobby", data=FORM)
+    r = client.post(f"{URL}/lobby", data=lobby_data(FORM))
     assert r.status_code == 200 and TOKEN not in r.text
     assert fake_clients.core.create_namespaced_secret.call_args.args[1]["stringData"] == {"github.token": TOKEN}
 
@@ -261,10 +261,10 @@ def test_saving_the_form_sends_the_token_only_to_the_k8s_secret(gh_client, fake_
 
 def test_blank_token_on_a_later_save_keeps_the_stored_one(gh_client, fake_clients):  # noqa: F811
     client, s, _ = gh_client
-    client.post(f"{URL}/lobby", data=FORM)
+    client.post(f"{URL}/lobby", data=lobby_data(FORM))
     fake_clients.core.create_namespaced_secret.reset_mock()
     fake_clients.core.patch_namespaced_secret.reset_mock()
-    r = client.post(f"{URL}/lobby", data={**FORM, "ext.github.token": ""})
+    r = client.post(f"{URL}/lobby", data=lobby_data({**FORM, "ext.github.token": ""}))
     assert r.status_code == 200
     fake_clients.core.create_namespaced_secret.assert_not_called()
     fake_clients.core.patch_namespaced_secret.assert_not_called()
@@ -272,10 +272,10 @@ def test_blank_token_on_a_later_save_keeps_the_stored_one(gh_client, fake_client
 
 def test_rotating_the_token_patches_the_secret_and_leaves_the_pod_spec_unchanged(gh_client, fake_clients):  # noqa: F811
     client, s, _ = gh_client
-    client.post(f"{URL}/lobby", data=FORM)
+    client.post(f"{URL}/lobby", data=lobby_data(FORM))
     before = _hash({"host": "git.example.com"})
     _existing_secret(fake_clients)
-    client.post(f"{URL}/lobby", data={**FORM, "ext.github.token": "github_pat_NEW"})
+    client.post(f"{URL}/lobby", data=lobby_data({**FORM, "ext.github.token": "github_pat_NEW"}))
     patch = fake_clients.core.patch_namespaced_secret.call_args.args[2]
     assert patch == {"stringData": {"github.token": "github_pat_NEW"}}
     assert _hash({"host": "git.example.com"}) == before
@@ -283,7 +283,7 @@ def test_rotating_the_token_patches_the_secret_and_leaves_the_pod_spec_unchanged
 
 def test_first_save_without_a_token_is_rejected(gh_client, fake_clients):  # noqa: F811
     client, s, plans = gh_client
-    r = client.post(f"{URL}/lobby", data={**FORM, "ext.github.token": ""})
+    r = client.post(f"{URL}/lobby", data=lobby_data({**FORM, "ext.github.token": ""}))
     assert r.status_code == 400 and "Token do GitHub: obrigatório" in r.text
     assert plans == []
     fake_clients.core.create_namespaced_secret.assert_not_called()
@@ -291,7 +291,7 @@ def test_first_save_without_a_token_is_rejected(gh_client, fake_clients):  # noq
 
 def test_invalid_host_is_rejected_and_nothing_is_saved(gh_client, fake_clients):  # noqa: F811
     client, s, plans = gh_client
-    r = client.post(f"{URL}/lobby", data={**FORM, "ext.github.host": "a\n[core]\nx = y"})
+    r = client.post(f"{URL}/lobby", data=lobby_data({**FORM, "ext.github.host": "a\n[core]\nx = y"}))
     assert r.status_code == 400 and "Servidor: formato inválido" in r.text
     assert plans == []
     fake_clients.core.create_namespaced_secret.assert_not_called()
@@ -301,7 +301,7 @@ def test_invalid_host_is_rejected_and_nothing_is_saved(gh_client, fake_clients):
 
 def test_card_is_ready_once_the_pod_is_up_and_has_no_actions(gh_client, fake_clients):  # noqa: F811
     client, s, _ = gh_client
-    client.post(f"{URL}/lobby", data=FORM)
+    client.post(f"{URL}/lobby", data=lobby_data(FORM))
     fake_clients.core.read_namespaced_pod.side_effect = None
     fake_clients.core.read_namespaced_pod.return_value = pod(sidecars=())
     (view,) = runtime.evaluate(s, OWNER)
@@ -312,9 +312,9 @@ def test_card_is_ready_once_the_pod_is_up_and_has_no_actions(gh_client, fake_cli
 
 def test_disabling_the_extension_wipes_its_key_from_the_secret(gh_client, fake_clients):  # noqa: F811
     client, s, _ = gh_client
-    client.post(f"{URL}/lobby", data=FORM)
+    client.post(f"{URL}/lobby", data=lobby_data(FORM))
     _existing_secret(fake_clients)
-    client.post(f"{URL}/lobby", data={"login_mode": "personal"})
+    client.post(f"{URL}/lobby", data=lobby_data({"login_mode": "personal"}))
     patch = fake_clients.core.patch_namespaced_secret.call_args.args[2]
     assert patch == {"data": {"github.token": None}}
 

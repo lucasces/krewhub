@@ -78,7 +78,10 @@ accepted only with `http`/`https`. Actions are `POST
 /devs/{owner_id}/extensions/{ext_id}/actions/{action_id}`: browsers send
 an HMAC anti-CSRF token (derived from the session secret, valid for one
 hour) and receive a redirect back to the cards; clients that authenticate
-with `Authorization: Bearer` get JSON and need no token.
+with `Authorization: Bearer` get JSON and need no token. The lobby form
+(`POST /devs/{owner_id}/lobby`, which enables extensions and stores their
+secrets) follows the same rule: it embeds a token bound to the owner and
+answers 403 without a valid one.
 `GET /devs/{owner_id}/extensions` returns the state of all extensions as
 JSON.
 

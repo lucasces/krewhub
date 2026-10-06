@@ -4,6 +4,7 @@ limpeza em /close e /logout (k8s e pod mockados)."""
 from __future__ import annotations
 
 import dataclasses
+import re
 from unittest import mock
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from app import chp_client, k8s_manager, kiro_login, session_client, store
 from app import k8s_templates as tpl
 from app.extensions import base, runtime
-from tests.ext_demo import demo_installed, enable_demo, fake_clients, pod  # noqa: F401
+from tests.ext_demo import demo_installed, enable_demo, fake_clients, lobby_data, pod  # noqa: F401
 from tests.test_close_logout import mocked_revoke, mocked_teardown, provisioned  # noqa: F401
 
 OWNER = "dev-a@test.local"
@@ -85,7 +86,7 @@ def test_lobby_form_without_admin_enabled_extensions_has_no_section(client, logi
 def test_lobby_post_saves_config_passes_plans_and_shows_cards_iframe(ext_client, login, infra, fake_clients):
     client, s = ext_client
     login(client)
-    r = client.post(f"{URL}/lobby", data=FORM)
+    r = client.post(f"{URL}/lobby", data=lobby_data(FORM))
     assert r.status_code == 200
     assert f'src="{HREF}/extensions/cards"' in r.text
     (plans,) = infra["reconcile"]
@@ -101,7 +102,7 @@ def test_lobby_post_saves_config_passes_plans_and_shows_cards_iframe(ext_client,
 def test_lobby_post_with_invalid_extension_config_saves_nothing(ext_client, login, infra, fake_clients):
     client, s = ext_client
     login(client)
-    r = client.post(f"{URL}/lobby", data={**FORM, "ext.demo.url": "http://insecure"})
+    r = client.post(f"{URL}/lobby", data=lobby_data({**FORM, "ext.demo.url": "http://insecure"}))
     assert r.status_code == 400
     assert "URL" in r.text
     assert infra["reconcile"] == []
@@ -112,10 +113,63 @@ def test_lobby_post_with_invalid_extension_config_saves_nothing(ext_client, logi
 
 def test_lobby_post_without_extensions_does_not_pass_plans(client, login, infra, demo_installed):
     login(client)
-    r = client.post(f"{URL}/lobby", data={"login_mode": "personal"})
+    r = client.post(f"{URL}/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 200
     assert infra["reconcile"] == [()]
     assert "iframe" not in r.text
+
+
+def test_lobby_form_embeds_a_csrf_token_bound_to_the_owner(ext_client, login, infra):
+    client, s = ext_client
+    login(client)
+    html_text = client.get(f"{URL}/lobby").text
+    token = re.search(r'name="csrf" value="([^"]+)"', html_text).group(1)
+    assert runtime.verify_csrf(s.session_secret, token, OWNER, "_lobby", "save")
+
+
+def test_lobby_post_without_csrf_token_is_403_and_changes_nothing(ext_client, login, infra, fake_clients):
+    client, s = ext_client
+    login(client)
+    r = client.post(f"{URL}/lobby", data=FORM)
+    assert r.status_code == 403
+    assert infra["reconcile"] == []
+    fake_clients.core.create_namespaced_secret.assert_not_called()
+    with store.connect(s.db_path) as conn:
+        assert store.get_extension(conn, OWNER, "demo") is None
+
+
+def test_lobby_post_with_another_owners_csrf_token_is_403(ext_client, login, infra):
+    client, s = ext_client
+    login(client)
+    other = runtime.make_csrf(s.session_secret, "dev-b@test.local", "_lobby", "save")
+    assert client.post(f"{URL}/lobby", data={**FORM, "csrf": other}).status_code == 403
+
+
+def test_lobby_post_rejects_expired_and_extension_action_tokens(ext_client, login, infra):
+    client, s = ext_client
+    login(client)
+    expired = runtime.make_csrf(s.session_secret, OWNER, "_lobby", "save", now=0)
+    assert client.post(f"{URL}/lobby", data={**FORM, "csrf": expired}).status_code == 403
+    action_token = runtime.make_csrf(s.session_secret, OWNER, "demo", "login")
+    assert client.post(f"{URL}/lobby", data={**FORM, "csrf": action_token}).status_code == 403
+
+
+def test_lobby_post_with_bearer_skips_csrf(ext_client, infra, sign_cookie):
+    client, _ = ext_client
+    r = client.post(
+        f"{URL}/lobby",
+        data=FORM,
+        headers={"Authorization": f"Bearer {sign_cookie(OWNER)}"},
+    )
+    assert r.status_code == 200
+
+
+def test_lobby_validation_error_page_carries_a_fresh_csrf_token(ext_client, login, infra):
+    client, _ = ext_client
+    login(client)
+    r = client.post(f"{URL}/lobby", data=lobby_data({**FORM, "ext.demo.url": "http://insecure"}))
+    assert r.status_code == 400
+    assert 'name="csrf"' in r.text
 
 
 def test_provision_maps_contribution_conflicts_to_422(ext_client, login, infra, monkeypatch):
@@ -127,7 +181,7 @@ def test_provision_maps_contribution_conflicts_to_422(ext_client, login, infra, 
         raise ContributionError("conflito")
 
     monkeypatch.setattr(runtime, "build_plans", boom)
-    r = client.post(f"{URL}/lobby", data=FORM)
+    r = client.post(f"{URL}/lobby", data=lobby_data(FORM))
     assert r.status_code == 422
 
 

@@ -888,6 +888,15 @@ def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = N
     )
 
 
+# Escopo do token anti-CSRF do form do lobby. Começa com "_" pra nunca
+# colidir com o id de uma extensão (ids casam `^[a-z]...`).
+_LOBBY_CSRF_SCOPE = ("_lobby", "save")
+
+
+def _lobby_csrf(owner_id: str) -> str:
+    return ext_runtime.make_csrf(_settings.session_secret, owner_id, *_LOBBY_CSRF_SCOPE)
+
+
 def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dict | None = None) -> str:
     """HTML puro (sem JS/framework) -- form de escolha da sessão, servido
     ANTES do provision rodar. `identity_provider`/`region` vêm
@@ -901,6 +910,7 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dic
     default_ip = html.escape(_settings.kiro_identity_provider)
     default_region = html.escape(_settings.kiro_region)
     extensions_html = _extensions_form_html(owner_id, ext_errors)
+    csrf = html.escape(_lobby_csrf(owner_id))
     return f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- nova sessão</title></head>
@@ -909,6 +919,7 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dic
   <p>Dev: <code>{owner_id_html}</code></p>
   {error_html}
   <form method="post" action="/devs/{owner_id_html}/lobby">
+    <input type="hidden" name="csrf" value="{csrf}">
     <fieldset>
       <legend>Como você vai logar no <code>kiro-cli</code>?</legend>
       <label><input type="radio" name="login_mode" value="org" required> Pro (organização / Identity Center SSO)</label><br>
@@ -1118,6 +1129,7 @@ def lobby_form(
 @app.post("/devs/{owner_id}/lobby", response_class=HTMLResponse)
 def lobby_submit(
     owner_id: str,
+    request: Request,
     login_mode: str = Form(...),
     identity_provider: str = Form(""),
     region: str = Form(""),
@@ -1132,7 +1144,18 @@ def lobby_submit(
     `login_mode` sem valor válido -- 400 (mesma régua de /kiro-login:
     nenhum modo assumido por default). Pra `login_mode=org`, os campos
     vazios caem pro default de env var; se nem o form nem a env var
-    tiverem valor, também 400 (nenhuma organização default)."""
+    tiverem valor, também 400 (nenhuma organização default).
+
+    Browser (cookie de sessão): exige o token anti-CSRF do form (mesmo
+    HMAC das ações das extensões, escopo "lobby"), senão 403 -- este POST
+    liga/desliga extensões e grava segredos. Chamada programática com
+    `Authorization: Bearer` dispensa o token (o browser não envia esse
+    header sozinho)."""
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_LOBBY_CSRF_SCOPE
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
     if login_mode not in kiro_login.MODES:
         raise HTTPException(
             status_code=400,
