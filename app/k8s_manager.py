@@ -303,22 +303,47 @@ def _wait_pod_gone(c: Clients, namespace: str, name: str, *, timeout_s: float, p
         time.sleep(poll_s)
 
 
+class PodRecreationError(RuntimeError):
+    """A recriação do Pod não terminou agora (o Pod antigo demorou a sair
+    ou outra requisição criou o novo primeiro) -- condição transitória: o
+    chamador deve responder 503 e o dev tentar de novo."""
+
+
 def _recreate_pod(c: Clients, namespace: str, name: str, body: dict, *, poll_s: float) -> str:
     try:
-        c.core.delete_namespaced_pod(name, namespace)
+        try:
+            c.core.delete_namespaced_pod(name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        _wait_pod_gone(c, namespace, name, timeout_s=_POD_GONE_TIMEOUT_S, poll_s=poll_s)
+        c.core.create_namespaced_pod(namespace, body)
+    except TimeoutError as exc:
+        raise PodRecreationError(str(exc)) from exc
     except ApiException as exc:
-        if exc.status != 404:
-            raise
-    _wait_pod_gone(c, namespace, name, timeout_s=_POD_GONE_TIMEOUT_S, poll_s=poll_s)
-    c.core.create_namespaced_pod(namespace, body)
+        if exc.status == 409:
+            raise PodRecreationError(f"conflito ao recriar o pod {name}: {exc.reason}") from exc
+        raise
     return "recreated"
 
 
 def ensure_pod(
-    c: Clients, namespace: str, slug: str, settings: Settings, *, body: dict | None = None, poll_s: float = 2
+    c: Clients,
+    namespace: str,
+    slug: str,
+    settings: Settings,
+    *,
+    body: dict | None = None,
+    poll_s: float = 2,
+    allow_recreate: bool = True,
 ) -> str:
     """create se não existe; patch se o spec não mudou; delete + espera
     sumir + create se mudou ("created"/"updated"/"recreated").
+
+    `allow_recreate=False` (caminhos GET): um spec que divergiria NÃO
+    derruba o Pod em uso -- nada é alterado e o retorno é "pending_update".
+    Pod que já está sendo deletado continua sendo recriado (não há
+    workspace em uso a proteger).
 
     O spec de um Pod é imutável -- patch com spec diferente dá 422. A
     anotação `krewhub.pespa.net/spec-hash` guarda o hash do spec com que
@@ -343,11 +368,15 @@ def ensure_pod(
     current = annotations.get(tpl.SPEC_HASH_ANNOTATION) if isinstance(annotations, dict) else None
     wanted = body["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION]
     if current is not None and current != wanted:
+        if not allow_recreate:
+            return "pending_update"
         return _recreate_pod(c, namespace, name, body, poll_s=poll_s)
     try:
         c.core.patch_namespaced_pod(name, namespace, body)
     except ApiException as exc:
         if exc.status == 422 and current is None:
+            if not allow_recreate:
+                return "pending_update"
             return _recreate_pod(c, namespace, name, body, poll_s=poll_s)
         raise
     return "updated"
@@ -456,9 +485,16 @@ def teardown_ext_resources(c: Clients, namespace: str, slug: str) -> str:
     )
 
 
-def reconcile_dev(settings: Settings, owner_id: str, ext_plans: tuple[ExtPlan, ...] = ()) -> dict:
+def reconcile_dev(
+    settings: Settings,
+    owner_id: str,
+    ext_plans: tuple[ExtPlan, ...] = (),
+    *,
+    allow_recreate: bool = True,
+) -> dict:
     """Idempotente: chamar de novo com o mesmo owner_id reaplica (patch) em
-    vez de duplicar. Retorna o resultado ANTES de esperar o pod ficar
+    vez de duplicar. `allow_recreate=False` impede que o Pod seja derrubado
+    por mudança de spec (`steps["pod"] == "pending_update"`). Retorna o resultado ANTES de esperar o pod ficar
     Ready -- quem chama decide se quer aguardar (`wait_for_ready`).
 
     Namespace é sempre `settings.dev_namespace` (COMPARTILHADO entre
@@ -488,7 +524,12 @@ def reconcile_dev(settings: Settings, owner_id: str, ext_plans: tuple[ExtPlan, .
             c, namespace, slug, collect_files(contributions)
         )
     steps["pod"] = ensure_pod(
-        c, namespace, slug, settings, body=tpl.build_pod(namespace, slug, settings, contributions)
+        c,
+        namespace,
+        slug,
+        settings,
+        body=tpl.build_pod(namespace, slug, settings, contributions),
+        allow_recreate=allow_recreate,
     )
     logger.info("reconcile owner_id=%s namespace=%s slug=%s steps=%s", owner_id, namespace, slug, steps)
     return {"owner_id": owner_id, "slug": slug, "namespace": namespace, "host": host, "steps": steps}

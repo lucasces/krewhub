@@ -179,6 +179,17 @@ teardown. Because the Pod spec is immutable, KrewHub stores a hash of the
 spec — including the content of those files — in an annotation and
 recreates the Pod when it changes.
 
+**When the Pod is recreated.** Recreation interrupts whatever runs in the
+Pod (the workspace stays on the PVC), so only an explicit `POST` does it:
+saving the lobby form, `POST /devs/{owner_id}/provision`, or the "Apply
+update" button. A `GET` (`/open`, the lobby) never deletes a running Pod.
+When the hash diverges, the lobby shows a "pending update" notice with a
+button (`POST /devs/{owner_id}/lobby/apply-update`, protected by the same
+kind of anti-CSRF token) and `/open` redirects (303) to the lobby instead
+of the dashboard. If the old Pod does not disappear within 120 seconds or
+another request creates the new one first (409), the request fails with
+`503` and `Retry-After`, and trying again completes it.
+
 ## Tools and skills in the main container
 
 The main container (`kirocrew`) has a read-only root filesystem, runs as

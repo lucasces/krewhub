@@ -408,9 +408,57 @@ def test_ensure_pod_delete_never_finishing_raises_timeout(fake_clients, monkeypa
     fake_clients.core.read_namespaced_pod.side_effect = None
     fake_clients.core.read_namespaced_pod.return_value = _existing_pod("stale")
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(k8s_manager.PodRecreationError, match="ainda existe"):
         k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
     fake_clients.core.create_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_without_recreate_leaves_a_diverged_pod_alone(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod("stale-hash")
+
+    status = k8s_manager.ensure_pod(
+        fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0, allow_recreate=False
+    )
+
+    assert status == "pending_update"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+    fake_clients.core.patch_namespaced_pod.assert_not_called()
+    fake_clients.core.create_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_without_recreate_still_patches_a_matching_pod(fake_clients):
+    settings = _settings()
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(_wanted_hash(settings))
+
+    status = k8s_manager.ensure_pod(
+        fake_clients, "krewhub-devs", "dev-a-test-local", settings, poll_s=0, allow_recreate=False
+    )
+
+    assert status == "updated"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_without_recreate_keeps_a_legacy_pod_the_apiserver_rejects(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(None)
+    fake_clients.core.patch_namespaced_pod.side_effect = ApiException(status=422)
+
+    status = k8s_manager.ensure_pod(
+        fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0, allow_recreate=False
+    )
+
+    assert status == "pending_update"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_create_conflict_during_recreation_raises_recreation_error(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = [_existing_pod("stale-hash"), _not_found()]
+    fake_clients.core.create_namespaced_pod.side_effect = ApiException(status=409, reason="AlreadyExists")
+
+    with pytest.raises(k8s_manager.PodRecreationError, match="conflito"):
+        k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
 
 
 def test_wait_for_ready_ignores_sidecar_containers(fake_clients):

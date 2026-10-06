@@ -41,7 +41,7 @@ def login(sign_cookie):
 def infra(monkeypatch, fake_clients):  # noqa: F811
     calls = {"reconcile": [], "ready": []}
 
-    def _reconcile(_s, owner_id, plans=()):
+    def _reconcile(_s, owner_id, plans=(), **_kw):
         calls["reconcile"].append(plans)
         slug = tpl.slugify(owner_id)
         return {"owner_id": owner_id, "slug": slug, "namespace": _s.dev_namespace,

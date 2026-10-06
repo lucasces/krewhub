@@ -587,25 +587,42 @@ def logout(request: Request) -> RedirectResponse:
     return redirect
 
 
-def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
+def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = True) -> dict:
     """Núcleo do reconcile -- extraído pra ser reaproveitado por
     `POST /devs/{owner_id}/provision` (chamada direta, uso de
     script/CI) e por `POST /devs/{owner_id}/lobby` (encadeado
-    automaticamente depois que o dev escolhe as opções da sessão)."""
+    automaticamente depois que o dev escolhe as opções da sessão).
+
+    `allow_recreate=False` é o modo dos caminhos GET (`/open`, lobby): se o
+    spec do Pod mudou (extensão, imagem), o Pod em uso NÃO é derrubado --
+    o resultado traz `update_pending=True` e a recriação só acontece num
+    POST explícito. Recriação que não termina agora (Pod antigo demorou a
+    sair, conflito de criação) vira 503 -- é transitório, tentar de novo."""
     if not owner_id.strip():
         raise HTTPException(status_code=400, detail="owner_id vazio")
 
+    # Só passa os planos / a flag quando necessário (o reconcile sem
+    # extensões e com recriação liberada segue exatamente como era).
+    reconcile_kwargs = {} if allow_recreate else {"allow_recreate": False}
     try:
         plans = ext_runtime.build_plans(_settings, owner_id)
-        # Só passa os planos quando há extensões ativas (o reconcile sem
-        # extensões segue exatamente como era).
         result = (
-            k8s_manager.reconcile_dev(_settings, owner_id, plans)
+            k8s_manager.reconcile_dev(_settings, owner_id, plans, **reconcile_kwargs)
             if plans
-            else k8s_manager.reconcile_dev(_settings, owner_id)
+            else k8s_manager.reconcile_dev(_settings, owner_id, **reconcile_kwargs)
         )
     except ContributionError as exc:
         raise HTTPException(status_code=422, detail=f"extensão inválida: {exc}") from exc
+    except k8s_manager.PodRecreationError as exc:
+        logger.warning("recriação do pod de owner_id=%s não terminou: %s", owner_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "o pod está sendo recriado e ainda não ficou disponível -- "
+                "aguarde alguns instantes e tente de novo"
+            ),
+            headers={"Retry-After": "10"},
+        ) from exc
     namespace = result["namespace"]
 
     with store.connect(_settings.db_path) as conn:
@@ -696,6 +713,7 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
     return {
         **result,
         "ready": ready,
+        "update_pending": result["steps"].get("pod") == "pending_update",
         "route": route,
         "dashboard_url_with_token": dashboard_url_with_token,
     }
@@ -763,13 +781,21 @@ def open_dashboard(owner_id: str, _owner: str = Depends(require_owner)) -> Redir
     trade-off aceito). Chamada programática sem sessão: 401 JSON. Sessão
     válida mas de OUTRO owner_id (ex.: link salvo/favoritado de outro dev):
     sempre 403 -- isso é falha de autorização, nunca vira um redirect
-    silencioso pro /login."""
+    silencioso pro /login.
+
+    Este GET nunca recria o Pod: se o spec mudou desde a criação do Pod
+    atual (extensão habilitada, imagem nova), redireciona (303) pro lobby,
+    que mostra "atualização pendente" e a ação POST que aplica."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
-    result = _do_provision(owner_id, wait=True)
+    result = _do_provision(owner_id, wait=True, allow_recreate=False)
+    if result["update_pending"]:
+        # GET nunca derruba o Pod em uso: o lobby explica a pendência e
+        # oferece o POST que aplica a atualização.
+        return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby", status_code=303)
     url = result.get("dashboard_url_with_token")
     if not url:
         raise HTTPException(status_code=502, detail="emissão de token falhou -- ver logs do serviço")
@@ -891,6 +917,7 @@ def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = N
 # Escopo do token anti-CSRF do form do lobby. Começa com "_" pra nunca
 # colidir com o id de uma extensão (ids casam `^[a-z]...`).
 _LOBBY_CSRF_SCOPE = ("_lobby", "save")
+_UPDATE_CSRF_SCOPE = ("_lobby", "update")
 
 
 def _lobby_csrf(owner_id: str) -> str:
@@ -949,6 +976,7 @@ def _lobby_result_html(
     kiro_result: dict | None,
     kiro_error: str | None,
     extensions_html: str = "",
+    update_pending: bool = False,
 ) -> str:
     """Ordem deliberada: login do kiro-cli PRIMEIRO, dashboard DEPOIS --
     sem o login completo, o dashboard mostra a tela de "sandbox
@@ -1015,11 +1043,27 @@ def _lobby_result_html(
         "</p>"
     )
 
+    pending_html = ""
+    if update_pending:
+        csrf = html.escape(ext_runtime.make_csrf(_settings.session_secret, owner_id, *_UPDATE_CSRF_SCOPE))
+        pending_html = (
+            '<div style="border:2px solid #c80;padding:0.5rem 1rem;margin:1rem 0">'
+            "<p><strong>Atualização pendente.</strong> A configuração do ambiente mudou "
+            "(extensões ou imagem) e o pod em execução ainda usa a anterior. Ele só é "
+            "recriado quando você aplicar: isso interrompe o que estiver rodando nele; "
+            "o workspace é preservado.</p>"
+            f'<form method="post" action="/devs/{owner_id_html}/lobby/apply-update">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            '<button type="submit">Aplicar atualização e reiniciar o pod</button>'
+            "</form></div>"
+        )
+
     return f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- sessão pronta</title></head>
 <body style="font-family: sans-serif; max-width: 640px; margin: 2rem auto;">
   <h1>Sessão de {owner_id_html}</h1>
+  {pending_html}
   <p>Sua sessão foi provisionada. Siga os dois passos abaixo, nesta ordem
   -- os links abrem em aba nova, esta página continua aberta.</p>
   {kiro_html}
@@ -1036,6 +1080,7 @@ def _run_lobby_session(
     login_mode: str,
     identity_provider: str,
     region: str,
+    allow_recreate: bool,
 ) -> HTMLResponse:
     """Núcleo reaproveitado por `POST /devs/{owner_id}/lobby` (form
     recém-submetido) E por `GET /devs/{owner_id}/lobby` quando já existe
@@ -1049,8 +1094,12 @@ def _run_lobby_session(
     responsabilidade do chamador (`lobby_submit` faz isso a partir do
     form; `lobby_form` lê direto do que já foi persistido, já resolvido
     da vez anterior). Persistência da escolha (`store.set_login_choice`)
-    também é responsabilidade do chamador -- não duplicada aqui."""
-    provision_result = _do_provision(owner_id, wait=True)
+    também é responsabilidade do chamador -- não duplicada aqui.
+
+    `allow_recreate`: o POST (escolha explícita do dev) libera a recriação
+    do Pod por mudança de spec; o GET não -- aí a página mostra
+    "atualização pendente"."""
+    provision_result = _do_provision(owner_id, wait=True, allow_recreate=allow_recreate)
 
     c = k8s_manager.get_clients(_settings)
     kiro_result = None
@@ -1074,6 +1123,7 @@ def _run_lobby_session(
             dashboard_url_with_token=provision_result.get("dashboard_url_with_token"),
             kiro_result=kiro_result,
             kiro_error=kiro_error,
+            update_pending=provision_result["update_pending"],
             # Cartões das extensões carregam à parte (iframe -> GET
             # /extensions/cards): hooks de status nunca bloqueiam o lobby.
             extensions_html=(
@@ -1123,6 +1173,7 @@ def lobby_form(
         login_mode=row["login_mode"],
         identity_provider=row["login_identity_provider"] or "",
         region=row["login_region"] or "",
+        allow_recreate=False,
     )
 
 
@@ -1200,7 +1251,27 @@ def lobby_submit(
         login_mode=login_mode,
         identity_provider=resolved_identity_provider or "",
         region=resolved_region or "",
+        allow_recreate=True,
     )
+
+
+@app.post("/devs/{owner_id}/lobby/apply-update")
+def lobby_apply_update(
+    owner_id: str,
+    request: Request,
+    form_fields: dict[str, str] = Depends(_form_fields),
+    _owner: str = Depends(require_owner),
+) -> RedirectResponse:
+    """Aplica a "atualização pendente": reconcilia permitindo recriar o
+    Pod (interrompe o que roda nele; o workspace fica no PVC) e volta
+    (303) pro lobby. Mesma regra anti-CSRF do `POST /lobby`."""
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_UPDATE_CSRF_SCOPE
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
+    _do_provision(owner_id, wait=True, allow_recreate=True)
+    return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby", status_code=303)
 
 
 @app.get("/devs/{owner_id}")

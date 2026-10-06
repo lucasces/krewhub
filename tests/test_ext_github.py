@@ -201,7 +201,7 @@ def gh_client(client, settings, monkeypatch, fake_clients, sign_cookie):  # noqa
     monkeypatch.setattr(main, "_settings", s)
     plans: list = []
 
-    def _reconcile(_s, owner_id, plans_=()):
+    def _reconcile(_s, owner_id, plans_=(), **_kw):
         plans.append(plans_)
         slug = main.tpl.slugify(owner_id)
         return {"owner_id": owner_id, "slug": slug, "namespace": _s.dev_namespace,
