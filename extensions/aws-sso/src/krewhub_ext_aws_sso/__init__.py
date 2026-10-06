@@ -78,8 +78,18 @@ PROFILES_DIR = "/profiles"
 PROFILES_MOUNT = "/etc/krewhub/aws-sso"
 #: papéis ativos ao mesmo tempo (o mesmo limite vale no supervisor)
 MAX_ROLES = 10
-DEFAULT_IMAGE = "ghcr.io/lucasces/krewhub-ext-aws-sso:0.1.0"
+#: imagem do sidecar e do initContainer; sem valor padrão de propósito --
+#: uma tag assumida que não existe no registro deixaria o Pod em
+#: ImagePullBackOff, então a extensão se recusa a ficar ativa sem ela
 IMAGE_ENV = "KREWHUB_EXT_AWS_SSO_IMAGE"
+IMAGE_MISSING_ERROR = (
+    f"a imagem do sidecar não está configurada: defina {IMAGE_ENV} no ambiente do KrewHub "
+    "(Helm: krewhubCentral.extensions.env) com a imagem krewhub-ext-aws-sso publicada"
+)
+
+
+def _image() -> str:
+    return os.environ.get(IMAGE_ENV, "").strip()
 
 LOGIN_TAG = "awssso_login"
 LOGIN_TIMEOUT = 20.0
@@ -182,11 +192,19 @@ class AwsSsoExtension(Extension):
         ),
     )
 
+    def validate(self, config: Mapping[str, Any]) -> list[str]:
+        errors = super().validate(config)
+        if not _image():
+            errors.append(IMAGE_MISSING_ERROR)
+        return errors
+
     # --- Pod -------------------------------------------------------------
 
     def pod_contribution(self, ctx: BuildContext) -> PodContribution:
         cfg = ctx.config
-        image = os.environ.get(IMAGE_ENV, DEFAULT_IMAGE)
+        image = _image()
+        if not image:
+            raise ExtensionError(IMAGE_MISSING_ERROR)
         files_vol = files_volume_name(EXT_ID)
         sidecar = {
             "name": SIDECAR,

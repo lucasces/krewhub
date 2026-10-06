@@ -116,7 +116,8 @@ krewhubCentral:
     # "" (default) = nenhuma. Exemplo: "aws-sso".
     enabled: ""
     # Variáveis de ambiente específicas de extensões, repassadas como
-    # estão. Exemplo: KREWHUB_EXT_AWS_SSO_IMAGE: ghcr.io/<owner>/krewhub-ext-aws-sso:0.1.0
+    # estão. Exemplo: KREWHUB_EXT_AWS_SSO_IMAGE: ghcr.io/<owner>/krewhub-ext-aws-sso:<versão>
+    # (obrigatório com a extensão aws-sso habilitada: não há imagem padrão).
     env: {}
 
   # --- Template do pod-por-dev (kirocrew-<slug>) -- passthrough genérico

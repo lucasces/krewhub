@@ -366,9 +366,13 @@ works, because it does not depend on the config file.
 architecture), runs as a non-root user and drops all capabilities. Pods use
 it both for the sidecar and for the `aws-sso-tools` init container. The
 release workflow publishes it as
-`ghcr.io/<owner>/krewhub-ext-aws-sso`. Set the image used by Pods with
-the environment variable `KREWHUB_EXT_AWS_SSO_IMAGE` (Helm:
-`krewhubCentral.extensions.env`).
+`ghcr.io/<owner>/krewhub-ext-aws-sso`. The image used by Pods must be set
+explicitly with the environment variable `KREWHUB_EXT_AWS_SSO_IMAGE` (Helm:
+`krewhubCentral.extensions.env`); there is no default tag. While it is
+unset or blank the extension fails validation with an error naming the
+variable: the lobby form refuses to enable it, an already enabled one shows
+an `error` card and contributes nothing to the Pod, so Pods never wait on an
+image that cannot be pulled.
 
 **Helm example.**
 
@@ -377,7 +381,7 @@ krewhubCentral:
   extensions:
     enabled: "aws-sso"
     env:
-      KREWHUB_EXT_AWS_SSO_IMAGE: "ghcr.io/example/krewhub-ext-aws-sso:0.1.0"
+      KREWHUB_EXT_AWS_SSO_IMAGE: "ghcr.io/example/krewhub-ext-aws-sso:<version>"
 ```
 
 ## GitHub (`github`)

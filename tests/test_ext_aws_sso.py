@@ -87,6 +87,31 @@ def test_default_region_falls_back_to_sso_region():
     assert env["AWS_REGION"] == "us-east-1"
 
 
+# --- imagem obrigatória ---------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_validate_fails_early_when_the_sidecar_image_is_not_configured(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("KREWHUB_EXT_AWS_SSO_IMAGE")
+    else:
+        monkeypatch.setenv("KREWHUB_EXT_AWS_SSO_IMAGE", value)
+    errors = AwsSsoExtension().validate(CFG)
+    assert len(errors) == 1
+    assert "KREWHUB_EXT_AWS_SSO_IMAGE" in errors[0] and "krewhubCentral.extensions.env" in errors[0]
+
+
+def test_validate_has_no_image_error_when_configured():
+    assert AwsSsoExtension().validate(CFG) == []
+
+
+def test_pod_contribution_refuses_to_guess_an_image(monkeypatch):
+    monkeypatch.delenv("KREWHUB_EXT_AWS_SSO_IMAGE")
+    ctx = base.BuildContext("dev@test.local", "dev-test-local", "ns", CFG, None)
+    with pytest.raises(base.ExtensionError, match="KREWHUB_EXT_AWS_SSO_IMAGE"):
+        AwsSsoExtension().pod_contribution(ctx)
+
+
 # --- Pod ------------------------------------------------------------------
 
 
