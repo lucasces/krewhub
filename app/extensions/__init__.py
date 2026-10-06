@@ -2,9 +2,15 @@
 
 "Instalada" e "habilitada" são coisas diferentes: instalar é `pip install`
 do pacote da extensão na imagem; habilitar é decisão do admin em
-`KREWHUB_EXTENSIONS_ENABLED` (lista de ids separados por vírgula). Só uma
-extensão instalada E habilitada entra em `enabled_extensions()` -- código
-instalado mas não habilitado nunca é instanciado."""
+`KREWHUB_EXTENSIONS_ENABLED` (lista de ids separados por vírgula).
+
+`discover()` importa e instancia TODA extensão instalada, habilitada ou
+não (precisa do `id` e da definição pra validar o entry point), então o
+código de um pacote instalado roda no processo do KrewHub. O que a
+habilitação controla é o efeito: só uma extensão instalada E habilitada
+entra em `enabled_extensions()`, e só ela contribui com o Pod, aparece no
+lobby e recebe ações. Por isso "instalar" já é uma decisão de confiança
+do admin, não só "habilitar"."""
 
 from __future__ import annotations
 

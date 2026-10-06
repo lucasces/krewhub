@@ -111,9 +111,10 @@ Two separate steps with two different owners:
 
 2. **Enabled** — the administrator lists the extension ids in
    `KREWHUB_EXTENSIONS_ENABLED` (comma-separated; Helm value
-   `krewhubCentral.extensions.enabled`). An installed extension that is
-   not listed is never loaded into the request path: it has no form
-   fields, no endpoints and contributes nothing to Pods.
+   `krewhubCentral.extensions.enabled`). Every installed extension is
+   imported and instantiated when the registry loads, listed or not. One
+   that is not listed has no form fields, no endpoints, receives no actions
+   and contributes nothing to Pods.
 
 Developers then opt in per workspace in the lobby.
 
