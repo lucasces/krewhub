@@ -63,6 +63,7 @@ def _running_pod_with_ready_containers() -> mock.Mock:
     pod = mock.Mock()
     pod.status.phase = "Running"
     container = mock.Mock()
+    container.name = "kirocrew"
     container.ready = True
     pod.status.container_statuses = [container]
     return pod
@@ -225,6 +226,7 @@ def test_wait_for_ready_running_phase_with_a_not_ready_container_is_not_ready(fa
     pod = mock.Mock()
     pod.status.phase = "Running"
     not_ready_container = mock.Mock()
+    not_ready_container.name = "kirocrew"
     not_ready_container.ready = False
     pod.status.container_statuses = [not_ready_container]
     fake_clients.core.read_namespaced_pod.return_value = pod
@@ -304,3 +306,188 @@ def test_teardown_dev_workload_raises_teardown_error_on_real_api_failure(fake_cl
 
     with pytest.raises(k8s_manager.TeardownError):
         k8s_manager.teardown_dev_workload(fake_clients, "krewhub-devs", "dev-a-test-local")
+
+
+# ---------------------------------------------------------------------------
+# ensure_pod -- spec-hash + recriação (spec de Pod é imutável)
+# ---------------------------------------------------------------------------
+
+
+def _existing_pod(spec_hash: str | None, *, deleting: bool = False) -> mock.Mock:
+    from datetime import datetime, timezone
+
+    pod = mock.Mock()
+    pod.metadata.annotations = {} if spec_hash is None else {"krewhub.pespa.net/spec-hash": spec_hash}
+    pod.metadata.deletion_timestamp = datetime.now(timezone.utc) if deleting else None
+    return pod
+
+
+def _wanted_hash(settings) -> str:
+    from app import k8s_templates as tpl
+
+    body = tpl.build_pod("krewhub-devs", "dev-a-test-local", settings)
+    return body["metadata"]["annotations"][tpl.SPEC_HASH_ANNOTATION]
+
+
+def test_ensure_pod_same_hash_patches(fake_clients):
+    settings = _settings()
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(_wanted_hash(settings))
+
+    status = k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", settings, poll_s=0)
+
+    assert status == "updated"
+    fake_clients.core.patch_namespaced_pod.assert_called_once()
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_changed_hash_deletes_waits_and_creates(fake_clients):
+    settings = _settings()
+    fake_clients.core.read_namespaced_pod.side_effect = [
+        _existing_pod("stale-hash"),  # leitura inicial
+        _existing_pod("stale-hash"),  # ainda existe logo após o delete
+        _not_found(),  # sumiu
+    ]
+
+    status = k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", settings, poll_s=0)
+
+    assert status == "recreated"
+    fake_clients.core.delete_namespaced_pod.assert_called_once_with("kirocrew-dev-a-test-local", "krewhub-devs")
+    fake_clients.core.patch_namespaced_pod.assert_not_called()
+    created = fake_clients.core.create_namespaced_pod.call_args[0][1]
+    assert created["metadata"]["annotations"]["krewhub.pespa.net/spec-hash"] == _wanted_hash(settings)
+
+
+def test_ensure_pod_changed_image_changes_hash(fake_clients):
+    old = _wanted_hash(_settings())
+    new = _wanted_hash(_settings(kirocrew_image="ghcr.io/kirodotdev/kirocrew:0.7.0"))
+    assert old != new
+
+
+def test_ensure_pod_legacy_pod_without_annotation_patches_first(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(None)
+
+    status = k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
+
+    assert status == "updated"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_legacy_pod_recreated_when_apiserver_rejects_patch(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = [_existing_pod(None), _not_found()]
+    fake_clients.core.patch_namespaced_pod.side_effect = ApiException(status=422, reason="Unprocessable")
+
+    status = k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
+
+    assert status == "recreated"
+    fake_clients.core.create_namespaced_pod.assert_called_once()
+
+
+def test_ensure_pod_422_with_matching_hash_is_not_swallowed(fake_clients):
+    settings = _settings()
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(_wanted_hash(settings))
+    fake_clients.core.patch_namespaced_pod.side_effect = ApiException(status=422, reason="Unprocessable")
+
+    with pytest.raises(ApiException):
+        k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", settings, poll_s=0)
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_pod_already_terminating_is_recreated(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = [_existing_pod("x", deleting=True), _not_found()]
+
+    status = k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
+
+    assert status == "recreated"
+
+
+def test_ensure_pod_delete_never_finishing_raises_timeout(fake_clients, monkeypatch):
+    monkeypatch.setattr(k8s_manager, "_POD_GONE_TIMEOUT_S", 0)
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod("stale")
+
+    with pytest.raises(k8s_manager.PodRecreationError, match="ainda existe"):
+        k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
+    fake_clients.core.create_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_without_recreate_leaves_a_diverged_pod_alone(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod("stale-hash")
+
+    status = k8s_manager.ensure_pod(
+        fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0, allow_recreate=False
+    )
+
+    assert status == "pending_update"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+    fake_clients.core.patch_namespaced_pod.assert_not_called()
+    fake_clients.core.create_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_without_recreate_still_patches_a_matching_pod(fake_clients):
+    settings = _settings()
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(_wanted_hash(settings))
+
+    status = k8s_manager.ensure_pod(
+        fake_clients, "krewhub-devs", "dev-a-test-local", settings, poll_s=0, allow_recreate=False
+    )
+
+    assert status == "updated"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_without_recreate_keeps_a_legacy_pod_the_apiserver_rejects(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = _existing_pod(None)
+    fake_clients.core.patch_namespaced_pod.side_effect = ApiException(status=422)
+
+    status = k8s_manager.ensure_pod(
+        fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0, allow_recreate=False
+    )
+
+    assert status == "pending_update"
+    fake_clients.core.delete_namespaced_pod.assert_not_called()
+
+
+def test_ensure_pod_create_conflict_during_recreation_raises_recreation_error(fake_clients):
+    fake_clients.core.read_namespaced_pod.side_effect = [_existing_pod("stale-hash"), _not_found()]
+    fake_clients.core.create_namespaced_pod.side_effect = ApiException(status=409, reason="AlreadyExists")
+
+    with pytest.raises(k8s_manager.PodRecreationError, match="conflito"):
+        k8s_manager.ensure_pod(fake_clients, "krewhub-devs", "dev-a-test-local", _settings(), poll_s=0)
+
+
+def test_wait_for_ready_ignores_sidecar_containers(fake_clients):
+    pod = mock.Mock()
+    pod.status.phase = "Running"
+    main = mock.Mock()
+    main.name = "kirocrew"
+    main.ready = True
+    sidecar = mock.Mock()
+    sidecar.name = "aws-sso"
+    sidecar.ready = False
+    pod.status.container_statuses = [main, sidecar]
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = pod
+
+    assert k8s_manager.wait_for_ready(fake_clients, "krewhub-devs", "dev-a-test-local", timeout_s=1, poll_s=0)
+
+
+def test_wait_for_ready_false_when_only_the_sidecar_is_ready(fake_clients):
+    pod = mock.Mock()
+    pod.status.phase = "Running"
+    main = mock.Mock()
+    main.name = "kirocrew"
+    main.ready = False
+    sidecar = mock.Mock()
+    sidecar.name = "aws-sso"
+    sidecar.ready = True
+    pod.status.container_statuses = [main, sidecar]
+    fake_clients.core.read_namespaced_pod.side_effect = None
+    fake_clients.core.read_namespaced_pod.return_value = pod
+
+    assert not k8s_manager.wait_for_ready(fake_clients, "krewhub-devs", "dev-a-test-local", timeout_s=0, poll_s=0)

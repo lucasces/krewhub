@@ -11,8 +11,9 @@ from unittest import mock
 
 import pytest
 
-from app import chp_client
+from app import chp_client, pod_exec
 from app.config import Settings
+from tests.ws_fake import wsfy
 
 
 def _settings(**overrides) -> Settings:
@@ -70,7 +71,7 @@ def test_register_route_uses_token_auth_header_not_bearer(monkeypatch, fake_clie
         captured["command"] = kwargs["command"]
         return "\nHTTP_STATUS:201\n"
 
-    monkeypatch.setattr(chp_client, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
     settings = _settings()
     result = chp_client.register_route(
         fake_clients, settings, host="dev-a-test-local.kiro.internal", target="http://svc:5476"
@@ -93,7 +94,7 @@ def test_register_route_payload_targets_expected_host_from_slug(monkeypatch, fak
         captured["command"] = kwargs["command"]
         return "\nHTTP_STATUS:201\n"
 
-    monkeypatch.setattr(chp_client, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
     settings = _settings(base_domain="kiro.internal")
     owner_id = "dev-a@test.local"
     slug = tpl.slugify(owner_id)
@@ -112,7 +113,7 @@ def test_register_route_raises_on_non_2xx_status(monkeypatch, fake_clients):
     def _fake_stream(*_a, **_kw):
         return "\nHTTP_STATUS:500\n"
 
-    monkeypatch.setattr(chp_client, "stream", _fake_stream)
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
     settings = _settings()
     with pytest.raises(chp_client.CHPError, match="500"):
         chp_client.register_route(fake_clients, settings, host="x.kiro.internal", target="http://y:5476")

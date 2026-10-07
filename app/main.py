@@ -23,7 +23,12 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import auth, chp_client, k8s_manager, kiro_login, session_client, store
+from app import extensions as ext_registry
+from app import k8s_templates as tpl
 from app.config import Settings, load_settings
+from app.extensions import runtime as ext_runtime
+from app.extensions import ui as ext_ui
+from app.extensions.contributions import ContributionError
 from app.oidc import OIDCConfigError, build_authorization_url, exchange_code
 
 logging.basicConfig(level=logging.INFO)
@@ -343,7 +348,25 @@ def callback(
     return redirect
 
 
-def _close_dev_session(owner_id: str) -> dict:
+def _cleanup_extensions(owner_id: str, c, *, all_secrets: bool) -> None:
+    """Parte de extensões do `/close`/`/logout`: remove o ConfigMap de
+    arquivos e apaga chaves do Secret `krewhub-ext-<slug>` (merge patch
+    com `null`; o RBAC não tem `delete` em secrets) -- TODAS no
+    `/logout`, só as `generated` no `/close` (o que o dev digitou
+    sobrevive). Melhor esforço: nunca levanta. Sem extensões habilitadas
+    e sem estado salvo pro dev, não toca no cluster."""
+    try:
+        with store.connect(_settings.db_path) as conn:
+            has_state = bool(store.list_extensions(conn, owner_id))
+        if not has_state and not ext_registry.enabled_extensions(_settings):
+            return
+        k8s_manager.teardown_ext_resources(c, _settings.dev_namespace, tpl.slugify(owner_id))
+        ext_runtime.wipe_secrets(_settings, owner_id, generated_only=not all_secrets, c=c)
+    except Exception:
+        logger.warning("limpeza das extensões falhou pra owner_id=%s", owner_id, exc_info=True)
+
+
+def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> dict:
     """Núcleo reaproveitado por `GET /close` (reporta erro pro chamador,
     via HTTP) e `GET /logout` (melhor esforço -- uma falha aqui NÃO pode
     impedir o logout do KrewHub em si, ver `logout` abaixo).
@@ -377,10 +400,20 @@ def _close_dev_session(owner_id: str) -> dict:
     `store.upsert` (só sobrescreve namespace/host/status/detail, NUNCA
     `login_mode`/`login_identity_provider`/`login_region`), sem apagar a
     linha -- é o que deixa o próximo `/provision`/`/open`/`/lobby`
-    reautenticar rápido, sem refazer OIDC nem o form do lobby."""
+    reautenticar rápido, sem refazer OIDC nem o form do lobby.
+
+    Extensões (`_cleanup_extensions`): roda DEPOIS do teardown, mas mesmo
+    quando ele falha -- uma falha de teardown não pode deixar credenciais
+    de extensão no Secret. `wipe_all_ext_secrets=True` (só `/logout`)
+    apaga todas as chaves; `/close` apaga só as geradas."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
+        if wipe_all_ext_secrets:
+            try:
+                _cleanup_extensions(owner_id, k8s_manager.get_clients(_settings), all_secrets=True)
+            except Exception:
+                logger.warning("limpeza das extensões falhou pra owner_id=%s", owner_id, exc_info=True)
         raise ValueError(f"owner_id={owner_id!r} não provisionado")
 
     c = k8s_manager.get_clients(_settings)
@@ -395,7 +428,12 @@ def _close_dev_session(owner_id: str) -> dict:
             owner_id, exc,
         )
 
-    teardown_result = k8s_manager.teardown_dev_workload(c, namespace=row["namespace"], slug=row["slug"])
+    try:
+        teardown_result = k8s_manager.teardown_dev_workload(
+            c, namespace=row["namespace"], slug=row["slug"]
+        )
+    finally:
+        _cleanup_extensions(owner_id, c, all_secrets=wipe_all_ext_secrets)
 
     with store.connect(_settings.db_path) as conn:
         store.upsert(
@@ -525,7 +563,7 @@ def logout(request: Request) -> RedirectResponse:
         # TeardownError: get_clients pode levantar RuntimeError com
         # kubeconfig/cluster indisponivel) so e logada.
         try:
-            _close_dev_session(owner_id)
+            _close_dev_session(owner_id, wipe_all_ext_secrets=True)
         except ValueError:
             logger.info("/logout pra owner_id=%s sem workload provisionado -- nada a desligar", owner_id)
         except Exception:
@@ -549,15 +587,42 @@ def logout(request: Request) -> RedirectResponse:
     return redirect
 
 
-def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
+def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = True) -> dict:
     """Núcleo do reconcile -- extraído pra ser reaproveitado por
     `POST /devs/{owner_id}/provision` (chamada direta, uso de
     script/CI) e por `POST /devs/{owner_id}/lobby` (encadeado
-    automaticamente depois que o dev escolhe as opções da sessão)."""
+    automaticamente depois que o dev escolhe as opções da sessão).
+
+    `allow_recreate=False` é o modo dos caminhos GET (`/open`, lobby): se o
+    spec do Pod mudou (extensão, imagem), o Pod em uso NÃO é derrubado --
+    o resultado traz `update_pending=True` e a recriação só acontece num
+    POST explícito. Recriação que não termina agora (Pod antigo demorou a
+    sair, conflito de criação) vira 503 -- é transitório, tentar de novo."""
     if not owner_id.strip():
         raise HTTPException(status_code=400, detail="owner_id vazio")
 
-    result = k8s_manager.reconcile_dev(_settings, owner_id)
+    # Só passa os planos / a flag quando necessário (o reconcile sem
+    # extensões e com recriação liberada segue exatamente como era).
+    reconcile_kwargs = {} if allow_recreate else {"allow_recreate": False}
+    try:
+        plans = ext_runtime.build_plans(_settings, owner_id)
+        result = (
+            k8s_manager.reconcile_dev(_settings, owner_id, plans, **reconcile_kwargs)
+            if plans
+            else k8s_manager.reconcile_dev(_settings, owner_id, **reconcile_kwargs)
+        )
+    except ContributionError as exc:
+        raise HTTPException(status_code=422, detail=f"extensão inválida: {exc}") from exc
+    except k8s_manager.PodRecreationError as exc:
+        logger.warning("recriação do pod de owner_id=%s não terminou: %s", owner_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "o pod está sendo recriado e ainda não ficou disponível -- "
+                "aguarde alguns instantes e tente de novo"
+            ),
+            headers={"Retry-After": "10"},
+        ) from exc
     namespace = result["namespace"]
 
     with store.connect(_settings.db_path) as conn:
@@ -590,6 +655,8 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
                 status_code=504,
                 detail=f"pod em {namespace} não ficou Ready dentro do timeout",
             )
+        if plans:
+            ext_runtime.on_pod_ready_best_effort(_settings, owner_id, c)
 
     target = f"http://kirocrew-{result['slug']}.{namespace}.svc.cluster.local:5476"
     c = k8s_manager.get_clients(_settings)
@@ -646,6 +713,7 @@ def _do_provision(owner_id: str, *, wait: bool = True) -> dict:
     return {
         **result,
         "ready": ready,
+        "update_pending": result["steps"].get("pod") == "pending_update",
         "route": route,
         "dashboard_url_with_token": dashboard_url_with_token,
     }
@@ -713,13 +781,21 @@ def open_dashboard(owner_id: str, _owner: str = Depends(require_owner)) -> Redir
     trade-off aceito). Chamada programática sem sessão: 401 JSON. Sessão
     válida mas de OUTRO owner_id (ex.: link salvo/favoritado de outro dev):
     sempre 403 -- isso é falha de autorização, nunca vira um redirect
-    silencioso pro /login."""
+    silencioso pro /login.
+
+    Este GET nunca recria o Pod: se o spec mudou desde a criação do Pod
+    atual (extensão habilitada, imagem nova), redireciona (303) pro lobby,
+    que mostra "atualização pendente" e a ação POST que aplica."""
     with store.connect(_settings.db_path) as conn:
         row = store.get(conn, owner_id)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
-    result = _do_provision(owner_id, wait=True)
+    result = _do_provision(owner_id, wait=True, allow_recreate=False)
+    if result["update_pending"]:
+        # GET nunca derruba o Pod em uso: o lobby explica a pendência e
+        # oferece o POST que aplica a atualização.
+        return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby", status_code=303)
     url = result.get("dashboard_url_with_token")
     if not url:
         raise HTTPException(status_code=502, detail="emissão de token falhou -- ver logs do serviço")
@@ -799,7 +875,56 @@ def kiro_login_start(
     return {"owner_id": owner_id, "mode": mode, **result}
 
 
-def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
+async def _form_fields(request: Request) -> dict[str, str]:
+    """Todos os campos string do form -- as extensões declaram campos
+    dinâmicos (`ext.<id>.<chave>`) que o `Form(...)` do FastAPI não
+    conhece de antemão."""
+    form = await request.form()
+    return {k: v for k, v in form.items() if isinstance(v, str)}
+
+
+async def _form_fields_multi(request: Request) -> dict[str, str | list[str]]:
+    """Como `_form_fields`, mas campo repetido (checkboxes de mesmo `name`)
+    vira lista -- usado pelos parâmetros `multiselect` das ações."""
+    form = await request.form()
+    fields: dict[str, str | list[str]] = {}
+    for key, value in form.multi_items():
+        if not isinstance(value, str):
+            continue
+        if key not in fields:
+            fields[key] = value
+        elif isinstance(fields[key], list):
+            fields[key].append(value)
+        else:
+            fields[key] = [fields[key], value]
+    return fields
+
+
+def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = None) -> str:
+    """Seção "Extensões" do form do lobby: uma caixa por extensão
+    habilitada pelo admin (vazio se nenhuma). Valores de campos `secret`
+    nunca voltam preenchidos."""
+    exts = ext_registry.enabled_extensions(_settings)
+    if not exts:
+        return ""
+    with store.connect(_settings.db_path) as conn:
+        rows = store.list_extensions(conn, owner_id)
+    return ext_ui.render_config_section(
+        [(ext, rows.get(ext_id), (errors or {}).get(ext_id, [])) for ext_id, ext in exts.items()]
+    )
+
+
+# Escopo do token anti-CSRF do form do lobby. Começa com "_" pra nunca
+# colidir com o id de uma extensão (ids casam `^[a-z]...`).
+_LOBBY_CSRF_SCOPE = ("_lobby", "save")
+_UPDATE_CSRF_SCOPE = ("_lobby", "update")
+
+
+def _lobby_csrf(owner_id: str) -> str:
+    return ext_runtime.make_csrf(_settings.session_secret, owner_id, *_LOBBY_CSRF_SCOPE)
+
+
+def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dict | None = None) -> str:
     """HTML puro (sem JS/framework) -- form de escolha da sessão, servido
     ANTES do provision rodar. `identity_provider`/`region` vêm
     pré-preenchidos com o default de KREWHUB_KIRO_IDENTITY_PROVIDER/
@@ -811,6 +936,8 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
     )
     default_ip = html.escape(_settings.kiro_identity_provider)
     default_region = html.escape(_settings.kiro_region)
+    extensions_html = _extensions_form_html(owner_id, ext_errors)
+    csrf = html.escape(_lobby_csrf(owner_id))
     return f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- nova sessão</title></head>
@@ -819,6 +946,7 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
   <p>Dev: <code>{owner_id_html}</code></p>
   {error_html}
   <form method="post" action="/devs/{owner_id_html}/lobby">
+    <input type="hidden" name="csrf" value="{csrf}">
     <fieldset>
       <legend>Como você vai logar no <code>kiro-cli</code>?</legend>
       <label><input type="radio" name="login_mode" value="org" required> Pro (organização / Identity Center SSO)</label><br>
@@ -833,6 +961,7 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None) -> str:
         <input type="text" name="region" value="{default_region}" size="20"
                placeholder="us-east-1"></label>
     </fieldset>
+    {extensions_html}
     <br>
     <button type="submit">Iniciar sessão</button>
   </form>
@@ -846,6 +975,8 @@ def _lobby_result_html(
     dashboard_url_with_token: str | None,
     kiro_result: dict | None,
     kiro_error: str | None,
+    extensions_html: str = "",
+    update_pending: bool = False,
 ) -> str:
     """Ordem deliberada: login do kiro-cli PRIMEIRO, dashboard DEPOIS --
     sem o login completo, o dashboard mostra a tela de "sandbox
@@ -912,15 +1043,32 @@ def _lobby_result_html(
         "</p>"
     )
 
+    pending_html = ""
+    if update_pending:
+        csrf = html.escape(ext_runtime.make_csrf(_settings.session_secret, owner_id, *_UPDATE_CSRF_SCOPE))
+        pending_html = (
+            '<div style="border:2px solid #c80;padding:0.5rem 1rem;margin:1rem 0">'
+            "<p><strong>Atualização pendente.</strong> A configuração do ambiente mudou "
+            "(extensões ou imagem) e o pod em execução ainda usa a anterior. Ele só é "
+            "recriado quando você aplicar: isso interrompe o que estiver rodando nele; "
+            "o workspace é preservado.</p>"
+            f'<form method="post" action="/devs/{owner_id_html}/lobby/apply-update">'
+            f'<input type="hidden" name="csrf" value="{csrf}">'
+            '<button type="submit">Aplicar atualização e reiniciar o pod</button>'
+            "</form></div>"
+        )
+
     return f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- sessão pronta</title></head>
 <body style="font-family: sans-serif; max-width: 640px; margin: 2rem auto;">
   <h1>Sessão de {owner_id_html}</h1>
+  {pending_html}
   <p>Sua sessão foi provisionada. Siga os dois passos abaixo, nesta ordem
   -- os links abrem em aba nova, esta página continua aberta.</p>
   {kiro_html}
   {dash_html}
+  {extensions_html}
   {session_links_html}
 </body>
 </html>"""
@@ -932,6 +1080,7 @@ def _run_lobby_session(
     login_mode: str,
     identity_provider: str,
     region: str,
+    allow_recreate: bool,
 ) -> HTMLResponse:
     """Núcleo reaproveitado por `POST /devs/{owner_id}/lobby` (form
     recém-submetido) E por `GET /devs/{owner_id}/lobby` quando já existe
@@ -945,8 +1094,12 @@ def _run_lobby_session(
     responsabilidade do chamador (`lobby_submit` faz isso a partir do
     form; `lobby_form` lê direto do que já foi persistido, já resolvido
     da vez anterior). Persistência da escolha (`store.set_login_choice`)
-    também é responsabilidade do chamador -- não duplicada aqui."""
-    provision_result = _do_provision(owner_id, wait=True)
+    também é responsabilidade do chamador -- não duplicada aqui.
+
+    `allow_recreate`: o POST (escolha explícita do dev) libera a recriação
+    do Pod por mudança de spec; o GET não -- aí a página mostra
+    "atualização pendente"."""
+    provision_result = _do_provision(owner_id, wait=True, allow_recreate=allow_recreate)
 
     c = k8s_manager.get_clients(_settings)
     kiro_result = None
@@ -970,6 +1123,14 @@ def _run_lobby_session(
             dashboard_url_with_token=provision_result.get("dashboard_url_with_token"),
             kiro_result=kiro_result,
             kiro_error=kiro_error,
+            update_pending=provision_result["update_pending"],
+            # Cartões das extensões carregam à parte (iframe -> GET
+            # /extensions/cards): hooks de status nunca bloqueiam o lobby.
+            extensions_html=(
+                ext_ui.render_cards_iframe(owner_id)
+                if ext_runtime.active_extensions(_settings, owner_id)
+                else ""
+            ),
         )
     )
 
@@ -1012,15 +1173,18 @@ def lobby_form(
         login_mode=row["login_mode"],
         identity_provider=row["login_identity_provider"] or "",
         region=row["login_region"] or "",
+        allow_recreate=False,
     )
 
 
 @app.post("/devs/{owner_id}/lobby", response_class=HTMLResponse)
 def lobby_submit(
     owner_id: str,
+    request: Request,
     login_mode: str = Form(...),
     identity_provider: str = Form(""),
     region: str = Form(""),
+    form_fields: dict[str, str] = Depends(_form_fields),
     _owner: str = Depends(require_owner),
 ) -> HTMLResponse:
     """Recebe a escolha do form, PERSISTE (store.set_login_choice),
@@ -1031,7 +1195,18 @@ def lobby_submit(
     `login_mode` sem valor válido -- 400 (mesma régua de /kiro-login:
     nenhum modo assumido por default). Pra `login_mode=org`, os campos
     vazios caem pro default de env var; se nem o form nem a env var
-    tiverem valor, também 400 (nenhuma organização default)."""
+    tiverem valor, também 400 (nenhuma organização default).
+
+    Browser (cookie de sessão): exige o token anti-CSRF do form (mesmo
+    HMAC das ações das extensões, escopo "lobby"), senão 403 -- este POST
+    liga/desliga extensões e grava segredos. Chamada programática com
+    `Authorization: Bearer` dispensa o token (o browser não envia esse
+    header sozinho)."""
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_LOBBY_CSRF_SCOPE
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
     if login_mode not in kiro_login.MODES:
         raise HTTPException(
             status_code=400,
@@ -1053,6 +1228,15 @@ def lobby_submit(
                 ),
             )
 
+    ext_changes, ext_errors = ext_runtime.parse_form(_settings, owner_id, form_fields)
+    if ext_errors:
+        return HTMLResponse(_lobby_form_html(owner_id, ext_errors=ext_errors), status_code=400)
+    try:
+        ext_runtime.save_form(_settings, owner_id, ext_changes)
+    except Exception as exc:
+        logger.error("falha ao salvar a config das extensões de owner_id=%s", owner_id, exc_info=True)
+        raise HTTPException(status_code=502, detail="falha ao salvar a configuração das extensões") from exc
+
     with store.connect(_settings.db_path) as conn:
         store.set_login_choice(
             conn,
@@ -1067,7 +1251,27 @@ def lobby_submit(
         login_mode=login_mode,
         identity_provider=resolved_identity_provider or "",
         region=resolved_region or "",
+        allow_recreate=True,
     )
+
+
+@app.post("/devs/{owner_id}/lobby/apply-update")
+def lobby_apply_update(
+    owner_id: str,
+    request: Request,
+    form_fields: dict[str, str] = Depends(_form_fields),
+    _owner: str = Depends(require_owner),
+) -> RedirectResponse:
+    """Aplica a "atualização pendente": reconcilia permitindo recriar o
+    Pod (interrompe o que roda nele; o workspace fica no PVC) e volta
+    (303) pro lobby. Mesma regra anti-CSRF do `POST /lobby`."""
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_UPDATE_CSRF_SCOPE
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
+    _do_provision(owner_id, wait=True, allow_recreate=True)
+    return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby", status_code=303)
 
 
 @app.get("/devs/{owner_id}")
@@ -1079,3 +1283,59 @@ def get_dev(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
     return dict(row)
+
+
+@app.get("/devs/{owner_id}/extensions")
+def extensions_status(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+    """Estado (JSON) das extensões habilitadas pelo admin: `state`,
+    `conditions` e ações disponíveis de cada uma."""
+    views = ext_runtime.evaluate(_settings, owner_id)
+    return {"extensions": [v.to_json() for v in views]}
+
+
+@app.get("/devs/{owner_id}/extensions/cards", response_class=HTMLResponse)
+def extensions_cards(owner_id: str, _owner: str = Depends(require_owner)) -> HTMLResponse:
+    """Cartões das extensões (HTML puro, sem JS). Embutido via `<iframe>`
+    na página final do lobby; recarrega sozinho (`meta refresh`) conforme
+    `ext_runtime.wants_refresh`."""
+    views = ext_runtime.evaluate(_settings, owner_id)
+    refresh = 5 if ext_runtime.wants_refresh(views) else None
+    return HTMLResponse(
+        ext_ui.render_cards_document(
+            owner_id,
+            [v.card_view() for v in views],
+            lambda ext_id, action_id: ext_runtime.make_csrf(
+                _settings.session_secret, owner_id, ext_id, action_id
+            ),
+            refresh_seconds=refresh,
+        )
+    )
+
+
+@app.post("/devs/{owner_id}/extensions/{ext_id}/actions/{action_id}")
+def extension_action(
+    owner_id: str,
+    ext_id: str,
+    action_id: str,
+    request: Request,
+    form_fields: dict[str, str | list[str]] = Depends(_form_fields_multi),
+    _owner: str = Depends(require_owner),
+):
+    """Executa uma ação declarada pela extensão. Browser (cookie de
+    sessão): exige o token anti-CSRF do cartão (HMAC amarrado a
+    owner+extensão+ação, com validade) e responde 303 de volta aos
+    cartões. Chamada programática com `Authorization: Bearer`: sem CSRF
+    (o header não é enviado automaticamente pelo browser) e resposta
+    JSON."""
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, str(form_fields.get("csrf", "")), owner_id, ext_id, action_id
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
+    try:
+        result = ext_runtime.run_action(_settings, owner_id, ext_id, action_id, form_fields)
+    except ext_runtime.ActionRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    if bearer or not _wants_html(request):
+        return {"ok": result.ok, "message": result.message}
+    return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/extensions/cards", status_code=303)

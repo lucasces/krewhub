@@ -4,6 +4,7 @@ servidor externo, suficiente pra rastrear o que o reconcile já criou."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -40,6 +41,26 @@ CREATE TABLE IF NOT EXISTS session_generations (
 );
 """
 
+# Estado por (dev, extensão). `config_json` guarda a config NÃO secreta e,
+# sob a chave reservada `__secrets__`, só marcadores `{chave: {"set": bool,
+# "updated_at": iso}}` -- o valor de um campo secret/generated NUNCA passa
+# por aqui, vive só no Secret `krewhub-ext-<slug>` do k8s.
+# `runtime_state_json` é o dict que os hooks da extensão leem/escrevem
+# (`ExtensionContext.state`); é descartado em /logout e /close.
+DEV_EXTENSIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS dev_extensions (
+    owner_id           TEXT NOT NULL,
+    ext_id             TEXT NOT NULL,
+    enabled            INTEGER NOT NULL DEFAULT 0,
+    config_json        TEXT NOT NULL DEFAULT '{}',
+    runtime_state_json TEXT NOT NULL DEFAULT '{}',
+    updated_at         TEXT NOT NULL,
+    PRIMARY KEY (owner_id, ext_id)
+);
+"""
+
+SECRETS_KEY = "__secrets__"
+
 # Migração leve pra bancos já criados antes desta coluna existir --
 # CREATE TABLE IF NOT EXISTS não adiciona coluna em tabela já existente.
 # NUNCA guarda o token de sessão em si (é credencial) -- só quando foi
@@ -67,6 +88,7 @@ def connect(db_path: str) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute(SCHEMA)
     conn.execute(SESSION_GENERATIONS_SCHEMA)
+    conn.execute(DEV_EXTENSIONS_SCHEMA)
     for migration in _MIGRATIONS:
         try:
             conn.execute(migration)
@@ -190,3 +212,95 @@ def bump_session_generation(conn: sqlite3.Connection, owner_id: str) -> int:
     )
     conn.commit()
     return get_session_generation(conn, owner_id)
+
+
+def _decode_extension(row: sqlite3.Row) -> dict:
+    config = json.loads(row["config_json"])
+    secrets = config.pop(SECRETS_KEY, {})
+    return {
+        "owner_id": row["owner_id"],
+        "ext_id": row["ext_id"],
+        "enabled": bool(row["enabled"]),
+        "config": config,
+        "secrets": secrets,
+        "runtime_state": json.loads(row["runtime_state_json"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_extension(conn: sqlite3.Connection, owner_id: str, ext_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM dev_extensions WHERE owner_id = ? AND ext_id = ?", (owner_id, ext_id)
+    ).fetchone()
+    return _decode_extension(row) if row is not None else None
+
+
+def list_extensions(conn: sqlite3.Connection, owner_id: str) -> dict[str, dict]:
+    rows = conn.execute(
+        "SELECT * FROM dev_extensions WHERE owner_id = ? ORDER BY ext_id", (owner_id,)
+    ).fetchall()
+    return {r["ext_id"]: _decode_extension(r) for r in rows}
+
+
+def upsert_extension(
+    conn: sqlite3.Connection,
+    owner_id: str,
+    ext_id: str,
+    *,
+    enabled: bool | None = None,
+    config: dict | None = None,
+    secrets: dict | None = None,
+    runtime_state: dict | None = None,
+) -> None:
+    """Atualização parcial: argumento `None` mantém o valor atual (linha
+    nova começa desabilitada, sem config, sem estado). `secrets` são os
+    marcadores `{chave: {"set": bool, "updated_at": iso}}`."""
+    current = get_extension(conn, owner_id, ext_id) or {
+        "enabled": False,
+        "config": {},
+        "secrets": {},
+        "runtime_state": {},
+    }
+    new_config = dict(current["config"] if config is None else config)
+    new_secrets = current["secrets"] if secrets is None else secrets
+    if new_secrets:
+        new_config[SECRETS_KEY] = new_secrets
+    conn.execute(
+        """
+        INSERT INTO dev_extensions (owner_id, ext_id, enabled, config_json, runtime_state_json, updated_at)
+        VALUES (:owner_id, :ext_id, :enabled, :config, :state, :now)
+        ON CONFLICT(owner_id, ext_id) DO UPDATE SET
+            enabled=excluded.enabled,
+            config_json=excluded.config_json,
+            runtime_state_json=excluded.runtime_state_json,
+            updated_at=excluded.updated_at
+        """,
+        {
+            "owner_id": owner_id,
+            "ext_id": ext_id,
+            "enabled": int(current["enabled"] if enabled is None else enabled),
+            "config": json.dumps(new_config),
+            "state": json.dumps(current["runtime_state"] if runtime_state is None else runtime_state),
+            "now": _now(),
+        },
+    )
+    conn.commit()
+
+
+def secret_marker() -> dict:
+    return {"set": True, "updated_at": _now()}
+
+
+def reset_extension_runtime(
+    conn: sqlite3.Connection, owner_id: str, ext_id: str, *, drop_secret_keys: set[str] | None = None
+) -> None:
+    """Descarta o estado de runtime e (opcional) os marcadores de secrets
+    cujas chaves foram apagadas do Secret do k8s (`None` = nenhum;
+    passe o conjunto de chaves apagadas). Não toca em `enabled`/config."""
+    current = get_extension(conn, owner_id, ext_id)
+    if current is None:
+        return
+    secrets = {
+        k: v for k, v in current["secrets"].items() if k not in (drop_secret_keys or set())
+    }
+    upsert_extension(conn, owner_id, ext_id, secrets=secrets, runtime_state={})

@@ -1,8 +1,10 @@
 name: Release
 
 # Triggered by pushing a tag matching v* (e.g. v1.2.3 for a stable
-# release, v1.2.3-rc.1 for a release candidate). Publishes BOTH the
-# multi-arch container image and the Helm chart. Pushing the tag is
+# release, v1.2.3-rc.1 for a release candidate). Publishes the multi-arch
+# krewhub-central image, the Helm chart and the krewhub-ext-aws-sso sidecar
+# image on every tag, plus a krewhub-central test image with the in-tree
+# extensions on `-rc.` tags only. Pushing the tag is
 # itself the deliberate release action -- publishing happens
 # automatically, no manual approval gate. See RELEASING.md for the
 # human-facing process (cutting a tag, promoting an RC to stable).
@@ -128,6 +130,97 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # --- Test image with the bundled extensions ----------------------------
+  # krewhub-central with the in-tree extensions installed, for validating
+  # extensions on a cluster before an official release. Only release
+  # candidate tags (`-rc.`) publish it; a stable tag never does. Same
+  # registry, owner and GITHUB_TOKEN as the other artifacts, and the same
+  # integration-test gate.
+
+  publish-image-extensions-test:
+    name: Publish central test image with extensions
+    needs: [determine-version, integration-test]
+    if: contains(needs.determine-version.outputs.version, '-rc.')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/krewhub-central
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},prefix=aws-sso-github-test-
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            KREWHUB_EXTENSIONS=./extensions/aws-sso ./extensions/github
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # --- Extension sidecar images -----------------------------------------
+  # Sidecar of the AWS SSO extension (extensions/aws-sso). Versioned with the
+  # same tag as krewhub-central so the pair can be pinned together.
+
+  publish-ext-aws-sso-image:
+    name: Publish AWS SSO extension sidecar image
+    needs: [determine-version, integration-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/krewhub-ext-aws-sso
+          tags: |
+            type=semver,pattern={{version}}
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: extensions/aws-sso
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
