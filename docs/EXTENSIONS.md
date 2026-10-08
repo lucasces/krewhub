@@ -499,3 +499,67 @@ whether the token is valid is only known to GitHub when git uses it.
 - **The token is readable inside the Pod.** Anything running in the
   workspace as the same user can read `/etc/krewhub/github/token`; that is
   inherent to letting `git` use it.
+
+## Alternative: Kiro Crew apps
+
+The model above (Secret, sidecar, Pod spec) could in principle be replaced
+by Kiro Crew apps (`kiro.dev/docs/crew/apps`), which would need no
+KrewHub-side infrastructure. A proof of concept for GitHub and AWS SSO
+rejected this alternative.
+
+### What a Crew app backend isolates
+
+A Crew app's `backend.entryPoint` runs as its own subprocess. The dashboard
+reaches it through the Gateway's authenticated reverse proxy
+(`/apps/<name>/api/*`), which requires a dashboard session token; calls to
+it from a chat session fail with `403 Token required`.
+
+The backend's bound port is also reachable directly over loopback by any
+local process, including the coding agent in the same host or sandbox, and
+the platform does not block that path. A route is protected only if the
+app's own code calls `kirocrew_client.verify_proxy_request()` and rejects
+unsigned calls. There is no platform-level network boundary (no separate
+container, no NetworkPolicy) between the agent and the app's backend, unlike
+the one between the `kirocrew` container and the `aws-sso` sidecar.
+
+Two further properties:
+
+- App-scoped storage (`getAppDataDir()`) lives under the home directory the
+  agent already reads (`~/.kiro/crew/apps/<name>/data`); nothing written
+  there is private from the agent.
+- When the HMAC-verification dependency fails to import, the backend serves
+  every route anyway (fail-open) instead of refusing them.
+
+### Role-grant escalation
+
+Storage that is not private from the agent, and a new login after a Pod
+restart, are acceptable: AWS SSO already requires re-authentication
+roughly every 12 hours. The unacceptable outcome is the coding agent
+obtaining credentials for IAM roles it was never granted, bypassing the
+human-gated role selection.
+
+The proof of concept added a write route (`POST /select_role`) on the same
+backend and port as the read-only credentials route. The route had no HMAC
+verification and no check against a pre-approved role allowlist
+(`granted_roles.json`), the same fail-open behavior as the read route. A
+plain agent, with only the loopback access it has by default, called the
+route directly and set an active role that was not in the allowlist. The
+same call through the Gateway's authenticated proxy was blocked (403); only
+the direct-port path succeeded.
+
+This can be fixed in an app by requiring `verify_proxy_request()` on every
+mutating route and validating the requested role against the allowlist
+server-side, but the platform enforces neither. Both checks are opt-in, per
+route, in application code, with no second layer if either is missed. Here,
+the equivalent action (`apply_roles`) runs on `krewhub-central`, a separate
+Pod that the dev's Pod has no network path to, so the guarantee holds even
+if the extension's own code has a bug. A Crew app would have to get this
+right in every route, with no structural backstop.
+
+### Decision
+
+Both extensions keep the hub and sidecar model (Secret, dedicated
+container, `NetworkPolicy`, RBAC-gated `pods/exec`). Crew apps become an
+option only if a requirement calls for running without any KrewHub-side
+infrastructure, and then only with the two checks above mandatory and
+covered by automated tests, not by code review alone.
