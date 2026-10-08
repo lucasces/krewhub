@@ -40,11 +40,18 @@ def mocked_infra(monkeypatch, settings):
         host = host_for(slug, _settings)
         return _fake_reconcile_result(owner_id, slug, _settings.dev_namespace, host)
 
-    calls = {"reconcile": 0, "wait": 0, "register_route": 0, "issue_token": 0}
+    calls = {
+        "reconcile": 0, "wait": 0, "register_route": 0, "issue_token": 0,
+        "allow_recreate": [], "pod_step": None,
+    }
 
-    def _reconcile_counted(_settings, owner_id):
+    def _reconcile_counted(_settings, owner_id, plans=(), *, allow_recreate=True):
         calls["reconcile"] += 1
-        return _reconcile(_settings, owner_id)
+        calls["allow_recreate"].append(allow_recreate)
+        result = _reconcile(_settings, owner_id)
+        if calls["pod_step"]:
+            result["steps"]["pod"] = calls["pod_step"]
+        return result
 
     def _wait_for_ready(*_a, **_kw):
         calls["wait"] += 1
@@ -148,6 +155,60 @@ def test_open_redirects_with_token_embedded(client, mocked_infra, settings, sign
     r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"].startswith("http://dev-a-test-local.kiro.internal:8080/?token=")
+
+
+def _provisioned(settings):
+    with store.connect(settings.db_path) as conn:
+        store.upsert(
+            conn,
+            owner_id="dev-a@test.local",
+            slug="dev-a-test-local",
+            namespace="krewhub-devs",
+            host="dev-a-test-local.kiro.internal",
+            status="routed",
+        )
+
+
+def test_open_never_allows_pod_recreation(client, mocked_infra, settings, sign_cookie):
+    _provisioned(settings)
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
+    assert mocked_infra["allow_recreate"] == [False]
+
+
+def test_open_with_pending_update_goes_to_the_lobby_instead_of_the_dashboard(
+    client, mocked_infra, settings, sign_cookie
+):
+    _provisioned(settings)
+    mocked_infra["pod_step"] = "pending_update"
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/devs/dev-a@test.local/lobby"
+
+
+def test_open_maps_recreation_failure_to_503(client, mocked_infra, settings, sign_cookie, monkeypatch):
+    _provisioned(settings)
+
+    def _boom(*_a, **_kw):
+        raise k8s_manager.PodRecreationError("conflito")
+
+    monkeypatch.setattr(k8s_manager, "reconcile_dev", _boom)
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    r = client.get("/devs/dev-a%40test.local/open", follow_redirects=False)
+    assert r.status_code == 503
+
+
+def test_provision_post_allows_recreation_and_maps_failure_to_503(client, mocked_infra, sign_cookie, monkeypatch):
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    assert client.post("/devs/dev-a%40test.local/provision").status_code == 200
+    assert mocked_infra["allow_recreate"] == [True]
+
+    def _boom(*_a, **_kw):
+        raise k8s_manager.PodRecreationError("timeout")
+
+    monkeypatch.setattr(k8s_manager, "reconcile_dev", _boom)
+    assert client.post("/devs/dev-a%40test.local/provision").status_code == 503
 
 
 def test_open_404_when_never_provisioned(client, mocked_infra, sign_cookie):

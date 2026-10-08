@@ -20,6 +20,13 @@ from app import auth
 from app.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _aws_sso_image(monkeypatch):
+    """A extensão aws-sso não tem imagem padrão (ver `krewhub_ext_aws_sso`);
+    os testes simulam o admin que a configurou."""
+    monkeypatch.setenv("KREWHUB_EXT_AWS_SSO_IMAGE", "registry.test/krewhub-ext-aws-sso:test")
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     """Settings determinística, isolada por teste (SQLite num arquivo

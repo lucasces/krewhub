@@ -28,6 +28,21 @@ RUN uv sync --frozen --no-dev
 
 COPY app/ ./app/
 
+# Extensoes (pacotes pip que publicam o entry point `krewhub.extensions`,
+# ver docs/EXTENSIONS.md) entram na MESMA venv, pinadas pelo admin neste
+# build arg -- lista de requirements separada por espaco, ex.:
+#   --build-arg KREWHUB_EXTENSIONS="./extensions/aws-sso ./extensions/github"
+# As extensoes in-tree NAO sao publicadas em nenhum indice publico: instale
+# sempre por caminho local, nunca por nome de pacote. Pacote de indice
+# privado: versao exata + requirements com hashes (`--require-hashes`).
+# O codigo delas roda DENTRO do krewhub-central (que tem pods/exec nos Pods
+# dos devs): so instale o que voce auditou.
+ARG KREWHUB_EXTENSIONS=""
+COPY extensions/ ./extensions/
+RUN if [ -n "$KREWHUB_EXTENSIONS" ]; then \
+      uv pip install --python /app/.venv/bin/python --no-cache $KREWHUB_EXTENSIONS; \
+    fi
+
 USER krewhub
 
 # .venv/bin na frente do PATH -- roda uvicorn (e qualquer python) direto

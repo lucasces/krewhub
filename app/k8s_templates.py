@@ -55,9 +55,14 @@ docs/ARCHITECTURE.md, não escondido."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from typing import Sequence
 
 from app.config import Settings
+from app.extensions.base import PodContribution
+from app.extensions.contributions import collect_files, merge_contributions
 from app.overlay import apply_overlay, load_overlay_ops
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -233,7 +238,30 @@ def build_networkpolicy(namespace: str, slug: str, settings: Settings) -> dict:
     }
 
 
-def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
+SPEC_HASH_ANNOTATION = "krewhub.pespa.net/spec-hash"
+
+
+def spec_hash(spec: dict, files: dict[str, str] | None = None) -> str:
+    """Hash estável do `spec` final do Pod (já com overlay e extensões).
+    O spec de um Pod é imutável no apiserver -- mudar imagem, sidecar ou
+    volume exige recriar. Comparar esse hash com a anotação do Pod
+    existente é o que diz se precisa.
+
+    `files` é o conteúdo dos arquivos das extensões (ConfigMap): o spec só
+    referencia as chaves, mas um sidecar que lê o arquivo no start precisa
+    ser recriado quando o conteúdo muda. Sem arquivos, o hash é o do spec
+    puro (Pods sem extensões não são recriados por isso)."""
+    payload = {"spec": spec, "files": files} if files else spec
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def build_pod(
+    namespace: str,
+    slug: str,
+    settings: Settings,
+    contributions: Sequence[tuple[str, PodContribution]] = (),
+) -> dict:
     """Antes desta fatia, este era `build_deployment` (gerava um
     `Deployment` de 1 réplica com `strategy: Recreate`, ver
     docs/ARCHITECTURE.md, seção "Pure Pod instead of Deployment for the
@@ -352,4 +380,12 @@ def build_pod(namespace: str, slug: str, settings: Settings) -> dict:
             ],
         },
     }
-    return apply_overlay(manifest, load_overlay_ops(settings, "pod"))
+    # Extensões entram ANTES do overlay (o overlay do admin tem a última
+    # palavra) e antes do hash (mudou a contribuição -> recria o Pod).
+    extra_annotations = merge_contributions(manifest["spec"], slug, contributions)
+    manifest = apply_overlay(manifest, load_overlay_ops(settings, "pod"))
+    manifest["metadata"].setdefault("annotations", {}).update(extra_annotations)
+    manifest["metadata"]["annotations"][SPEC_HASH_ANNOTATION] = spec_hash(
+        manifest["spec"], collect_files(contributions)
+    )
+    return manifest

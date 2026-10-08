@@ -68,6 +68,36 @@ generic/empty).
 
 ## Technical gotchas
 
+- Extensions (`app/extensions/`, plugins under `extensions/`) are
+  documented in `docs/EXTENSIONS.md`. The `dev` group installs
+  `krewhub-ext-aws-sso` as an editable path dependency so tests load
+  the real entry point; `uv sync --no-dev` leaves it out of the image,
+  which installs plugins only through the `KREWHUB_EXTENSIONS` build
+  arg. Plugins must not depend on `krewhub`, and the dataclasses in
+  `app/extensions/base.py` are a public API: changing them needs an
+  `API_VERSION` bump.
+- Kiro Crew (inside `kirocrew`) discovers skills by scanning
+  `~/.kiro/skills/<name>/SKILL.md` (and `~/.kiro/crew/skills/`); it follows
+  the ConfigMap `..data` symlinks, so a skill can be a plain ConfigMap
+  mount (`PodContribution.skills`) or a sub-path of the tools volume
+  (`ToolsSpec.skills`, content from the extension image). A pod `env` `PATH` replaces the image's `PATH`
+  entirely, so `app/extensions/contributions.py` builds it from a fixed
+  Debian default (`DEFAULT_MAIN_PATH`) plus the extensions' tool dirs.
+- `aws-sso` serves several roles at once: the first is the unslotted
+  default on `/`, the others are named slots (`/slot/<profile>`) exposed
+  to the main container as `credential_process` profiles in a managed
+  `AWS_CONFIG_FILE`. With `aws-sso-cli` 2.3.2, `aws-sso ecs unload`
+  panics and `DELETE /` on the default slot crashes the server on the
+  next read, so the supervisor removes slots with `DELETE /slot/<name>`
+  over HTTP and never deletes the default. See `docs/EXTENSIONS.md`.
+- Secret rotation never recreates a Pod: `spec_hash` covers the spec and
+  the contributed files, not secret values, and `secretKeyRef` env vars are
+  read only at container start. An extension whose credential must follow
+  rotation mounts it as a file through its own `secret` volume (the kubelet
+  refreshes it in about a minute), as `github` does with a credential
+  helper reading `/etc/krewhub/github/token`. `subPath` mounts, such as the
+  files ConfigMap, never refresh.
+
 - The CHP API uses the header `Authorization: token <value>` (not
   `Bearer`) — `app/chp_client.py`. `Bearer` is the format for KrewHub's
   own session token, a different endpoint.
@@ -130,6 +160,15 @@ generic/empty).
   `kubectl exec`, via POST/SPDY). A `ClusterRole` with only `create` on
   `pods/exec` fails with a 403 "cannot **get** resource pods/exec" —
   it needs `get` too.
+- Exec output must not go through the client's preloaded response:
+  `connect_get_namespaced_pod_exec` has `response_type='str'`, and
+  `ApiClient.deserialize` runs `json.loads` on the stdout first, so any
+  output that is entirely valid JSON (an object, a list, `true`, `123`)
+  comes back as `str(obj)` — the Python repr (`True`, `None`, single
+  quotes) — and the trailing newline is lost. Always go through
+  `pod_exec.exec_command`/`exec_sh`, which request the raw `WSClient`
+  (`_preload_content=False`); never call `kubernetes.stream.stream`
+  directly for output you will parse.
 - Testing `*.kiro.internal` via local port-forward: always point at the
   CHP Service (`svc/configurable-http-proxy`, the public port from
   `--host-routing`), never directly at an individual app's Service
@@ -143,10 +182,12 @@ generic/empty).
   domain, or person — not in code, commit messages, or as literal
   text in `.gitignore` itself (an entry like `deploy/acme-corp/`
   would leak the name into version control even as an ignore rule).
-  The one `.gitignore` entry that exists for this class of file,
-  `values-*.yaml`, is a generic filename pattern that names no third
-  party — it's what keeps a real, filled-in cluster values file (e.g.
-  `charts/krewhub/examples/values-<your-cluster>.yaml`) out of git.
+  The `.gitignore` entries that exist for this class of file are
+  generic patterns that name no third party: `values-*.yaml` keeps a
+  real, filled-in cluster values file (e.g.
+  `charts/krewhub/examples/values-<your-cluster>.yaml`) out of git, and
+  `deploy/` keeps per-environment manifests and values kept next to the
+  checkout (e.g. `deploy/<environment>/`) out of it.
 - The Helm chart is generic by design — no default value in
   `charts/krewhub/values.yaml` assumes a specific cluster
   (StorageClass, domain, node topology, secret mechanism). Examples of

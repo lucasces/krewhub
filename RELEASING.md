@@ -1,16 +1,21 @@
 # Releasing
 
-This project publishes two artifacts on every release: the
-`krewhub-central` container image (multi-arch, `linux/amd64` +
-`linux/arm64`) and the `charts/krewhub` Helm chart, both to GHCR
-(`ghcr.io/<owner>`). Both are built and pushed by
+This project publishes these artifacts to GHCR (`ghcr.io/<owner>`),
+all built and pushed by
 [`.github/workflows/release.yml`](.github/workflows/release.yml),
-triggered by pushing a tag matching `v*`.
+triggered by pushing a tag matching `v*`:
+
+- On every tag: the `krewhub-central` container image (multi-arch,
+  `linux/amd64` + `linux/arm64`, **without** extensions), the
+  `charts/krewhub` Helm chart, and the `krewhub-ext-aws-sso` extension
+  sidecar image (multi-arch, same version as the central image).
+- On release candidate tags containing `-rc.` only: a test image of
+  `krewhub-central` with the in-tree extensions installed (see below).
 
 Pushing the tag *is* the release action; there is no manual approval
 gate in front of publishing. `release.yml` runs the CI checks first
 (`needs:` on the same test/lint job used for every push and PR), then
-builds and pushes the image and the chart automatically.
+builds and pushes the images and the chart automatically.
 
 Confirm, in **Settings → Actions → General → Workflow permissions**,
 that "Read and write permissions" is selected (or that `packages: write`
@@ -32,6 +37,12 @@ treated as a release candidate. `release.yml`:
   `1.2.3-rc.1` (no `latest` tag — RCs never move `latest`).
 - Packages the chart with `version`/`appVersion` set to `1.2.3-rc.1` and
   pushes it to `oci://ghcr.io/<owner>/charts`.
+- Also pushes the `krewhub-ext-aws-sso` sidecar image tagged `1.2.3-rc.1`.
+- If the tag contains `-rc.` (e.g. `v0.2.0-rc.9`), also pushes a test
+  image of `krewhub-central` with the in-tree extensions (`aws-sso`,
+  `github`) installed, tagged `aws-sso-github-test-0.2.0-rc.9`, for trying
+  extensions on a cluster. Other pre-release tags such as `-beta.N`
+  do not publish it, and neither do stable tags.
 - Publishing starts immediately once CI passes — no approval step.
 
 ## Promoting to a stable release
@@ -72,7 +83,7 @@ artifact.
 
 ## Auth
 
-Both the image and chart publish jobs log in to `ghcr.io` using
+Every publish job logs in to `ghcr.io` using
 `${{ github.actor }}` / `${{ secrets.GITHUB_TOKEN }}` (no PAT). This
 works out of the box for a **new** package that doesn't exist in GHCR
 yet — the first authenticated push creates it, linked to this

@@ -113,7 +113,10 @@ RBAC (the `ClusterRole` has no `delete` on
 `secrets`/`persistentvolumeclaims` — defense in depth, not just code
 discipline). This is what guarantees a subsequent `/provision`
 rebuilds the workload from scratch with the same `kiro-cli`
-workspace/history.
+workspace/history. The separate extension Secret
+(`krewhub-ext-<slug>`) is the one exception to "never touched": both
+endpoints remove keys from it with a merge patch, never the object — see
+[`EXTENSIONS.md`](EXTENSIONS.md#secrets-lifecycle) for which keys.
 
 ## RBAC: a non-obvious verb
 
@@ -169,3 +172,16 @@ support made sense here. Consciously accepted trade-off: a
 crash, accidental `kubectl delete pod`, node going down); a plain
 `Pod` doesn't — `/provision` needs to run again manually (automatic
 idle culling doesn't exist yet, see Limitations in the README).
+
+## Extensions
+
+Extensions are discovered through Python entry points rather than
+configured by path so that the administrator controls exactly which
+code runs: a package must be installed in the image *and* listed in
+`KREWHUB_EXTENSIONS_ENABLED`. Their contributions are merged into the
+Pod before the JSON Patch overlay, so a cluster overlay can still adjust
+what an extension adds. Secrets live in a dedicated Secret
+(`krewhub-ext-<slug>`) and are removed key by key with a merge patch,
+because the `ClusterRole` has no `delete` on `secrets`. The full model,
+the supply-chain trade-off and the AWS SSO design are in
+[`EXTENSIONS.md`](EXTENSIONS.md).

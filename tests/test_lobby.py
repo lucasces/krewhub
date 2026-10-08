@@ -11,6 +11,7 @@ import pytest
 
 from app import chp_client, k8s_manager, kiro_login, session_client, store
 from app.k8s_templates import host_for, slugify
+from tests.ext_demo import lobby_data
 
 
 @pytest.fixture
@@ -30,11 +31,15 @@ def mocked_infra(monkeypatch, settings):
             "steps": {"namespace": "exists", "pod": "created"},
         }
 
-    calls = {"reconcile": 0, "kiro_login": []}
+    calls = {"reconcile": 0, "kiro_login": [], "allow_recreate": [], "pod_step": None}
 
-    def _reconcile_counted(_settings, owner_id):
+    def _reconcile_counted(_settings, owner_id, plans=(), *, allow_recreate=True):
         calls["reconcile"] += 1
-        return _reconcile(_settings, owner_id)
+        calls["allow_recreate"].append(allow_recreate)
+        result = _reconcile(_settings, owner_id)
+        if calls["pod_step"]:
+            result["steps"]["pod"] = calls["pod_step"]
+        return result
 
     def _kiro_login(_c, *, namespace, slug, mode, identity_provider=None, region=None):
         calls["kiro_login"].append(
@@ -94,6 +99,77 @@ def test_get_lobby_skips_form_when_login_mode_already_saved(client, mocked_infra
     assert mocked_infra["kiro_login"][0]["mode"] == "personal"
 
 
+def test_get_lobby_never_allows_pod_recreation(client, mocked_infra, sign_cookie, settings):
+    with store.connect(settings.db_path) as conn:
+        store.set_login_choice(conn, owner_id="dev-a@test.local", mode="personal")
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    client.get("/devs/dev-a%40test.local/lobby")
+    assert mocked_infra["allow_recreate"] == [False]
+
+
+def test_get_lobby_shows_pending_update_with_a_csrf_protected_apply_form(client, mocked_infra, sign_cookie, settings):
+    with store.connect(settings.db_path) as conn:
+        store.set_login_choice(conn, owner_id="dev-a@test.local", mode="personal")
+    mocked_infra["pod_step"] = "pending_update"
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    r = client.get("/devs/dev-a%40test.local/lobby")
+    assert r.status_code == 200
+    assert "Atualização pendente" in r.text
+    assert 'action="/devs/dev-a@test.local/lobby/apply-update"' in r.text
+    assert 'name="csrf"' in r.text
+
+
+def test_get_lobby_without_divergence_has_no_pending_notice(client, mocked_infra, sign_cookie, settings):
+    with store.connect(settings.db_path) as conn:
+        store.set_login_choice(conn, owner_id="dev-a@test.local", mode="personal")
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    assert "Atualização pendente" not in client.get("/devs/dev-a%40test.local/lobby").text
+
+
+def test_post_lobby_allows_pod_recreation(client, mocked_infra, sign_cookie):
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
+    assert r.status_code == 200
+    assert mocked_infra["allow_recreate"] == [True]
+
+
+def test_apply_update_requires_its_own_csrf_token(client, mocked_infra, sign_cookie, settings):
+    import app.main as main
+    from app.extensions import runtime
+
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    url = "/devs/dev-a%40test.local/lobby/apply-update"
+    assert client.post(url, data={}, follow_redirects=False).status_code == 403
+    lobby_token = main._lobby_csrf("dev-a@test.local")  # token do POST /lobby não vale aqui
+    assert client.post(url, data={"csrf": lobby_token}, follow_redirects=False).status_code == 403
+    other = runtime.make_csrf(settings.session_secret, "dev-b@test.local", "_lobby", "update")
+    assert client.post(url, data={"csrf": other}, follow_redirects=False).status_code == 403
+    assert mocked_infra["reconcile"] == 0
+
+
+def test_apply_update_recreates_and_redirects_back_to_the_lobby(client, mocked_infra, sign_cookie, settings):
+    from app.extensions import runtime
+
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    token = runtime.make_csrf(settings.session_secret, "dev-a@test.local", "_lobby", "update")
+    r = client.post("/devs/dev-a%40test.local/lobby/apply-update", data={"csrf": token}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/devs/dev-a@test.local/lobby"
+    assert mocked_infra["allow_recreate"] == [True]
+
+
+def test_recreation_timeout_on_post_is_503_with_a_message(client, mocked_infra, sign_cookie, monkeypatch):
+    def _boom(*_a, **_kw):
+        raise k8s_manager.PodRecreationError("pod x ainda existe após 120s do delete")
+
+    monkeypatch.setattr(k8s_manager, "reconcile_dev", _boom)
+    client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
+    assert r.status_code == 503
+    assert "tente de novo" in r.json()["detail"]
+    assert r.headers["retry-after"] == "10"
+
+
 def test_get_lobby_uses_previously_saved_org_values(client, mocked_infra, sign_cookie, settings):
     with store.connect(settings.db_path) as conn:
         store.set_login_choice(
@@ -151,19 +227,19 @@ def test_post_lobby_without_login_mode_is_422(client, mocked_infra, sign_cookie)
     por isso lá "ausente" e "inválido" dão os dois 400. Documentando a
     diferença real, não escondendo atrás de um teste ajustado às cegas."""
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({}))
     assert r.status_code == 422
 
 
 def test_post_lobby_invalid_login_mode_is_400(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "bogus"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "bogus"}))
     assert r.status_code == 400
 
 
 def test_post_lobby_org_without_identity_provider_or_region_is_400(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "org"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "org"}))
     assert r.status_code == 400
     assert "identity_provider" in r.json()["detail"]
 
@@ -172,11 +248,13 @@ def test_post_lobby_org_with_form_values_succeeds_and_persists(client, mocked_in
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
     r = client.post(
         "/devs/dev-a%40test.local/lobby",
-        data={
-            "login_mode": "org",
-            "identity_provider": "https://form-value.example/start",
-            "region": "form-region-1",
-        },
+        data=lobby_data(
+            {
+                "login_mode": "org",
+                "identity_provider": "https://form-value.example/start",
+                "region": "form-region-1",
+            }
+        ),
     )
     assert r.status_code == 200
     call = mocked_infra["kiro_login"][0]
@@ -195,7 +273,9 @@ def test_post_lobby_personal_ignores_identity_provider_and_region_even_if_sent(c
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
     r = client.post(
         "/devs/dev-a%40test.local/lobby",
-        data={"login_mode": "personal", "identity_provider": "should-be-ignored", "region": "should-be-ignored"},
+        data=lobby_data(
+            {"login_mode": "personal", "identity_provider": "should-be-ignored", "region": "should-be-ignored"}
+        ),
     )
     assert r.status_code == 200
     call = mocked_infra["kiro_login"][0]
@@ -205,13 +285,13 @@ def test_post_lobby_personal_ignores_identity_provider_and_region_even_if_sent(c
 
 
 def test_post_lobby_requires_auth(client, mocked_infra):
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 401
 
 
 def test_post_lobby_rejects_cross_owner(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-b@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 403
 
 
@@ -222,7 +302,7 @@ def test_post_lobby_rejects_cross_owner(client, mocked_infra, sign_cookie):
 
 def test_result_page_has_reconfigure_close_and_logout_links(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 200
     assert 'href="/devs/dev-a@test.local/lobby?reconfigure=1"' in r.text
     assert 'href="/close"' in r.text
@@ -239,13 +319,13 @@ def test_result_page_shows_already_logged_in_message(client, mocked_infra, sign_
         lambda *_a, **_kw: {"already_logged_in": True, "whoami": "logged in as dev-a"},
     )
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert r.status_code == 200
     assert "já está logado" in r.text or "ja esta logado" in r.text.lower()
 
 
 def test_result_page_shows_device_flow_link_when_not_logged_in(client, mocked_infra, sign_cookie):
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    r = client.post("/devs/dev-a%40test.local/lobby", data={"login_mode": "personal"})
+    r = client.post("/devs/dev-a%40test.local/lobby", data=lobby_data({"login_mode": "personal"}))
     assert "https://idp.test/device" in r.text
     assert "WXYZ-0001" in r.text
