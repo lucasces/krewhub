@@ -61,6 +61,11 @@ def settings(tmp_path) -> Settings:
         kiro_region="",
         self_host="",
         self_port=8080,
+        # Loop de reconcile do CHP DESLIGADO na suite geral (0) -- os
+        # testes dele (test_reconcile.py) ligam explicitamente num
+        # Settings próprio. Sem isso, o lifespan do TestClient subiria
+        # uma thread de fundo batendo em k8s/CHP reais por teste.
+        chp_reconcile_interval_seconds=0,
     )
 
 

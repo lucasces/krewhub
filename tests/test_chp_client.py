@@ -130,3 +130,67 @@ def test_register_route_raises_when_no_chp_pod_found():
 def test_parse_status_raises_when_marker_missing():
     with pytest.raises(chp_client.CHPError):
         chp_client._parse_status("resposta sem o marcador esperado")
+
+
+def test_self_target_points_at_krewhub_central_in_chp_namespace():
+    settings = _settings(chp_namespace="chp-ns", self_port=8080)
+    assert (
+        chp_client.self_target(settings)
+        == "http://krewhub-central.chp-ns.svc.cluster.local:8080"
+    )
+
+
+def test_dev_target_points_at_kirocrew_pod_on_dashboard_port():
+    assert (
+        chp_client.dev_target("dev-a-test-local", "krewhub-devs")
+        == f"http://kirocrew-dev-a-test-local.krewhub-devs.svc.cluster.local:{chp_client.DEV_POD_PORT}"
+    )
+
+
+def test_list_routes_parses_json_body_separate_from_http_status(monkeypatch, fake_clients):
+    """A listagem separa o corpo JSON do `HTTP_STATUS` anexado via -w --
+    o host-routing do CHP devolve as chaves com barra inicial."""
+    captured = {}
+
+    def _fake_stream(_exec_fn, pod_name, namespace, **kwargs):
+        captured["command"] = kwargs["command"]
+        body = '{"/krewhub.example.com": {"target": "http://krewhub-central:8080"}}'
+        return f"{body}\nHTTP_STATUS:200\n"
+
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
+    routes = chp_client.list_routes(fake_clients, _settings())
+
+    assert routes == {"/krewhub.example.com": {"target": "http://krewhub-central:8080"}}
+    curl_cmd = captured["command"][-1]
+    assert curl_cmd.rstrip().endswith("/api/routes")
+    assert "-X POST" not in curl_cmd
+    assert "Authorization: token $CONFIGPROXY_AUTH_TOKEN" in curl_cmd
+
+
+def test_list_routes_returns_empty_dict_for_empty_table(monkeypatch, fake_clients):
+    """Tabela vazia (o estado exato logo após um restart do pod do CHP)
+    -- 200 com corpo `{}`, devolve dict vazio, NÃO levanta."""
+
+    def _fake_stream(*_a, **_kw):
+        return "{}\nHTTP_STATUS:200\n"
+
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
+    assert chp_client.list_routes(fake_clients, _settings()) == {}
+
+
+def test_list_routes_raises_on_non_200(monkeypatch, fake_clients):
+    def _fake_stream(*_a, **_kw):
+        return "\nHTTP_STATUS:500\n"
+
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
+    with pytest.raises(chp_client.CHPError, match="500"):
+        chp_client.list_routes(fake_clients, _settings())
+
+
+def test_list_routes_raises_on_invalid_json(monkeypatch, fake_clients):
+    def _fake_stream(*_a, **_kw):
+        return "not json at all\nHTTP_STATUS:200\n"
+
+    monkeypatch.setattr(pod_exec, "stream", wsfy(_fake_stream))
+    with pytest.raises(chp_client.CHPError, match="JSON"):
+        chp_client.list_routes(fake_clients, _settings())

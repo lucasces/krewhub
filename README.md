@@ -32,6 +32,15 @@ by hand.
   calls.
 - **Automated `kiro-cli login`** (device flow), no manual TTY from the
   operator required.
+- **Self-healing CHP routes**: `configurable-http-proxy` keeps its route
+  table only in memory, so a CHP pod restart would otherwise drop every
+  route (central site and all dev pods) and return 404 everywhere until
+  `krewhub-central` was manually restarted. A background reconcile loop
+  re-registers the central route and every provisioned dev pod's route
+  from persisted state within roughly `2 ×` the reconcile interval
+  (`KREWHUB_CHP_RECONCILE_INTERVAL_SECONDS`, default 45 s), with no
+  manual intervention. Its state is reported under the `reconcile` field
+  of `GET /healthz`.
 - **`/close` and `/logout`** with real workload teardown — always
   preserve the dev's PVC (workspace) and Secret (credential), so a
   subsequent provision rebuilds from scratch with the same history.

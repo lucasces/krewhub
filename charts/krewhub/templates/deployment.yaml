@@ -70,6 +70,19 @@ spec:
             - name: KREWHUB_SELF_PORT
               value: {{ .Values.krewhubCentral.selfPort | quote }}
             {{- end }}
+            {{- if ne (toString .Values.krewhubCentral.chpReconcileIntervalSeconds) "" }}
+            # Loop de reconcile periódico das rotas do CHP (ver
+            # app/reconcile.py). O CHP guarda rotas só em memória: quando
+            # o pod dele reinicia, a tabela zera e o site cai em 404 até
+            # as rotas serem re-registradas. Este loop re-sincroniza a
+            # self-route e as rotas dos devs provisionados a cada N
+            # segundos. "" (omitido) cai no default do código (45s); 0
+            # desliga o loop (precisa ser emitido explicitamente -- por
+            # isso `ne (toString ...) ""` e não `with`, que trataria 0
+            # como falsy e omitiria o env, caindo no default de 45s).
+            - name: KREWHUB_CHP_RECONCILE_INTERVAL_SECONDS
+              value: {{ .Values.krewhubCentral.chpReconcileIntervalSeconds | quote }}
+            {{- end }}
             {{- with .Values.krewhubCentral.devPodTemplate.storageClass }}
             # StorageClass do PVC de workspace de CADA pod-por-dev (ver
             # app/k8s_templates.py::build_pvc) -- só presente se
