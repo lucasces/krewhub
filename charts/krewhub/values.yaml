@@ -106,6 +106,22 @@ krewhubCentral:
   selfHost: ""
   selfPort: 8080
 
+  # Intervalo (segundos) do reconcile periódico das rotas do CHP
+  # (KREWHUB_CHP_RECONCILE_INTERVAL_SECONDS; app/reconcile.py). O CHP
+  # guarda a tabela de rotas SÓ em memória: quando o pod do CHP reinicia
+  # ou é recriado, a tabela zera e TODA rota se perde -- a do próprio
+  # krewhub-central e a de cada pod-por-dev já provisionado -- e o site
+  # inteiro passa a devolver 404 ("No service is registered at this
+  # URL") até alguém re-registrar. Este loop re-sincroniza, de forma
+  # idempotente, a self-route (de selfHost) e as rotas dos devs ativos
+  # (do SQLite) de volta pro CHP, sem precisar reiniciar o
+  # krewhub-central. Após um restart do pod do CHP, as rotas voltam em
+  # no máximo ~2x este intervalo. "" (default) = cai no default do
+  # código (45). 0 DESLIGA o loop (volta ao comportamento antigo: rota
+  # registrada só uma vez, no startup/provision). O estado do loop é
+  # exposto em GET /healthz (campo `reconcile`).
+  chpReconcileIntervalSeconds: ""
+
   dbPath: /data/krewhub.db
 
   # --- Extensões (docs/EXTENSIONS.md). Uma extensão precisa estar

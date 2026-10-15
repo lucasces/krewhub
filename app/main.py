@@ -18,6 +18,7 @@ import html
 import logging
 import sqlite3
 import urllib.parse
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -25,6 +26,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from app import auth, chp_client, k8s_manager, kiro_login, session_client, store
 from app import extensions as ext_registry
 from app import k8s_templates as tpl
+from app import reconcile as reconcile_mod
 from app.config import Settings, load_settings
 from app.extensions import runtime as ext_runtime
 from app.extensions import ui as ext_ui
@@ -34,9 +36,62 @@ from app.oidc import OIDCConfigError, build_authorization_url, exchange_code
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("krewhub")
 
-app = FastAPI(title="KrewHub central", version="0.1.0")
-
 _settings: Settings = load_settings()
+
+# Sinal observável do reconcile periódico das rotas do CHP (ver
+# app/reconcile.py). Vive no módulo pra que `/healthz` o leia e o
+# lifespan o passe pro loop. O loop em si é criado/parado no lifespan.
+_reconcile_status = reconcile_mod.ReconcileStatus()
+_reconcile_loop: reconcile_mod.ReconcileLoop | None = None
+
+
+def _self_register_route() -> None:
+    """Reaproveita a mesma infra já usada pros pods de dev (CHP
+    host-routing) pra expor o próprio KrewHub central -- em vez de uma
+    Ingress nova (não há Ingress controller neste cluster hoje, ver
+    docs/ARCHITECTURE.md, seção "Exposure without an Ingress
+    controller"). Só roda se KREWHUB_SELF_HOST estiver configurado
+    (vazio por padrão -- não faz sentido tentar isso rodando local, fora
+    do cluster, sem o pod do CHP por perto). Falha aqui é só um warning,
+    não derruba o boot -- o serviço continua acessível via port-forward
+    direto no Service mesmo sem a rota, e o reconcile periódico
+    (app/reconcile.py) re-registra a self-route no próximo ciclo de
+    qualquer forma."""
+    if not _settings.self_host:
+        logger.info("KREWHUB_SELF_HOST não configurado -- pulando auto-registro de rota no CHP")
+        return
+    try:
+        c = k8s_manager.get_clients(_settings)
+        route = chp_client.register_route(
+            c, _settings, host=_settings.self_host, target=chp_client.self_target(_settings)
+        )
+        logger.info("auto-registro de rota no CHP ok: %s", route)
+    except Exception:
+        logger.exception("auto-registro de rota no CHP falhou -- serviço segue de pé, só sem essa rota")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Substitui o antigo `@app.on_event("startup")` (deprecado no
+    FastAPI/Starlette): no boot, faz o auto-registro da self-route (uma
+    vez, melhor esforço) e sobe o loop de reconcile periódico das rotas
+    do CHP (app/reconcile.py), que é o que recupera o site sozinho
+    quando o pod do CHP reinicia e perde a tabela de rotas (issue #7).
+    No shutdown, para o loop limpo. O loop lê `_settings`/`_reconcile_status`
+    do módulo, que os testes monkeypatcham por teste."""
+    global _reconcile_loop
+    _self_register_route()
+    _reconcile_loop = reconcile_mod.ReconcileLoop(_settings, _reconcile_status)
+    _reconcile_loop.start()
+    try:
+        yield
+    finally:
+        if _reconcile_loop is not None:
+            _reconcile_loop.stop()
+            _reconcile_loop = None
+
+
+app = FastAPI(title="KrewHub central", version="0.1.0", lifespan=_lifespan)
 
 # state -> code_verifier, só durante a janela entre /login e /callback
 # (minutos). Em memória de propósito -- o code_verifier NUNCA pode viajar
@@ -179,32 +234,17 @@ def require_owner(owner_id: str, request: Request) -> str:
     return token_owner_id
 
 
-@app.on_event("startup")
-def _self_register_route() -> None:
-    """Reaproveita a mesma infra já usada pros pods de dev (CHP
-    host-routing) pra expor o próprio KrewHub central -- em vez de uma
-    Ingress nova (não há Ingress controller neste cluster hoje, ver
-    docs/ARCHITECTURE.md, seção "Exposure without an Ingress
-    controller"). Só roda se KREWHUB_SELF_HOST
-    estiver configurado (vazio por padrão -- não faz sentido tentar isso
-    rodando local, fora do cluster, sem o pod do CHP por perto). Falha
-    aqui é só um warning, não derruba o boot -- o serviço continua
-    acessível via port-forward direto no Service mesmo sem a rota."""
-    if not _settings.self_host:
-        logger.info("KREWHUB_SELF_HOST não configurado -- pulando auto-registro de rota no CHP")
-        return
-    try:
-        c = k8s_manager.get_clients(_settings)
-        target = f"http://krewhub-central.{_settings.chp_namespace}.svc.cluster.local:{_settings.self_port}"
-        route = chp_client.register_route(c, _settings, host=_settings.self_host, target=target)
-        logger.info("auto-registro de rota no CHP ok: %s", route)
-    except Exception:
-        logger.exception("auto-registro de rota no CHP falhou -- serviço segue de pé, só sem essa rota")
-
-
 @app.get("/healthz")
 def healthz() -> dict:
-    return {"status": "ok"}
+    """Liveness/readiness. Inclui o estado do reconcile periódico das
+    rotas do CHP (issue #7) pra que um reconcile persistentemente
+    quebrado (RBAC errado, CHP inalcançável) fique visível sem precisar
+    ler log -- `reconcile.consecutive_failures` crescente é o sinal de
+    alarme. NÃO faz o `status` geral virar erro: o `krewhub-central` em
+    si segue saudável mesmo com o reconcile falhando (ele só não estaria
+    recuperando a tabela de rotas do CHP), e marcar not-ready aqui
+    derrubaria o pod de um problema que é do CHP/RBAC, não dele."""
+    return {"status": "ok", "reconcile": _reconcile_status.to_health()}
 
 
 @app.get("/")
@@ -658,7 +698,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
         if plans:
             ext_runtime.on_pod_ready_best_effort(_settings, owner_id, c)
 
-    target = f"http://kirocrew-{result['slug']}.{namespace}.svc.cluster.local:5476"
+    target = chp_client.dev_target(result["slug"], namespace)
     c = k8s_manager.get_clients(_settings)
     try:
         route = chp_client.register_route(c, _settings, host=result["host"], target=target)

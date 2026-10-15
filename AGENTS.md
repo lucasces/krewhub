@@ -101,6 +101,19 @@ generic/empty).
 - The CHP API uses the header `Authorization: token <value>` (not
   `Bearer`) — `app/chp_client.py`. `Bearer` is the format for KrewHub's
   own session token, a different endpoint.
+- CHP keeps its route table **in memory only** — a CHP pod restart drops
+  every route (central + all dev pods) and the site 404s until the
+  routes are re-registered. `app/reconcile.py` runs a background thread
+  (started from the FastAPI `lifespan` in `app/main.py`, not
+  `@app.on_event` — that's deprecated) that lists CHP routes every
+  `KREWHUB_CHP_RECONCILE_INTERVAL_SECONDS` (default 45; 0 disables) and
+  idempotently re-registers the self-route and any provisioned dev
+  routes (SQLite status in `reconcile.ACTIVE_ROUTE_STATUSES`) that are
+  missing. Failures are non-fatal and surface in `GET /healthz` under
+  `reconcile` (`consecutive_failures` is the alarm signal). The route
+  targets are built by `chp_client.self_target`/`dev_target` — reuse
+  those, don't re-hardcode `kirocrew-<slug>...:5476`, so the reconcile
+  and the `/provision` path can't drift apart.
 - The Kiro Crew dashboard validates `Host`/`Origin` against
   `KIROCREW_CORS_ORIGINS`. When TLS terminates at the edge
   (LB/Ingress) and the internal backend is plain HTTP,

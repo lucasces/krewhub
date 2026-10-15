@@ -63,6 +63,14 @@ class Settings:
     self_host: str
     self_port: int
 
+    # --- reconcile periódico das rotas do CHP (ver app/reconcile.py +
+    # o lifespan em main.py). O CHP guarda rotas só em memória: quando o
+    # pod dele reinicia, a tabela zera e TODA rota (central + pods de
+    # dev) se perde até alguém re-registrar. Este loop re-sincroniza a
+    # partir do estado persistido (self_host + SQLite). Intervalo em
+    # segundos; 0 (ou negativo) DESLIGA o loop por completo. ---
+    chp_reconcile_interval_seconds: int = 45
+
     # --- extensões (ids instalados que o admin habilita; ver docs/EXTENSIONS.md) ---
     extensions_enabled: str = ""
 
@@ -98,5 +106,8 @@ def load_settings() -> Settings:
         kiro_region=_env("KREWHUB_KIRO_REGION"),
         self_host=_env("KREWHUB_SELF_HOST"),
         self_port=int(_env("KREWHUB_SELF_PORT", "8080")),
+        chp_reconcile_interval_seconds=int(
+            _env("KREWHUB_CHP_RECONCILE_INTERVAL_SECONDS", "45")
+        ),
         extensions_enabled=_env("KREWHUB_EXTENSIONS_ENABLED"),
     )
