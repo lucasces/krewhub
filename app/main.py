@@ -447,7 +447,7 @@ def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> 
     de extensão no Secret. `wipe_all_ext_secrets=True` (só `/logout`)
     apaga todas as chaves; `/close` apaga só as geradas."""
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get_provisioned(conn, owner_id)
     if row is None:
         if wipe_all_ext_secrets:
             try:
@@ -776,7 +776,7 @@ def new_session(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
     Não requer que /provision tenha sido chamado antes NESTA execução do
     processo, só que o namespace já exista (senão 404)."""
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get_provisioned(conn, owner_id)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
@@ -880,7 +880,7 @@ def kiro_login_start(
         )
 
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get_provisioned(conn, owner_id)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
@@ -1319,7 +1319,7 @@ def get_dev(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
     """Lookup do registro de um dev específico. Protegido por
     `require_owner` (mesmo guard de `/provision`/`/session`/`/lobby`)."""
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get_provisioned(conn, owner_id)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
     return dict(row)

@@ -179,6 +179,24 @@ def get(conn: sqlite3.Connection, owner_id: str) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM devs WHERE owner_id = ?", (owner_id,)).fetchone()
 
 
+def get_provisioned(conn: sqlite3.Connection, owner_id: str) -> sqlite3.Row | None:
+    """Como get(), mas trata uma linha PLACEHOLDER como NÃO provisionada.
+
+    set_login_choice() insere uma linha com namespace/slug/host vazios ANTES
+    do provision rodar. Se reconcile_dev falha, a linha fica com esses valores
+    vazios e status='lobby_pending'. Os guards de "não provisionado" não podem
+    tratar essa linha como provisionada.
+
+    Checa `namespace` e NÃO `status`: um /close numa linha placeholder reescreve
+    status para 'closed' mas deixa namespace vazio -- um check por status perderia
+    essa linha.
+    """
+    row = get(conn, owner_id)
+    if row is None or not row["namespace"]:
+        return None
+    return row
+
+
 def mark_token_issued(conn: sqlite3.Connection, owner_id: str) -> None:
     conn.execute(
         "UPDATE devs SET last_token_issued_at = ?, updated_at = ? WHERE owner_id = ?",
