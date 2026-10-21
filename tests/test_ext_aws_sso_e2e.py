@@ -140,7 +140,7 @@ def test_card_shows_link_and_code_after_start_login_then_flips_when_logged_in(aw
 def test_start_login_over_http_with_csrf_redirects_and_renders_the_code(aws_client, sidecar, login):
     client, s = aws_client
     login(client)
-    token = runtime.make_csrf(s.session_secret, OWNER, "aws-sso", "start_login")
+    token = runtime.make_csrf(s.session_secret, OWNER, "aws-sso", "start_login:default")
     r = client.post(
         f"{URL}/extensions/aws-sso/actions/start_login",
         data={"csrf": token},

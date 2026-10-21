@@ -134,7 +134,7 @@ def test_bump_session_generation_is_per_owner(settings):
 def test_verify_session_payload_includes_gen():
     token = auth.sign_session(OWNER_A, secret="s", ttl_seconds=60, gen=3)
     payload = auth.verify_session_payload(token, secret="s")
-    assert payload == {"owner_id": OWNER_A, "exp": mock.ANY, "gen": 3}
+    assert payload == {"owner_id": OWNER_A, "exp": mock.ANY, "gen": 3, "profile": "default"}
 
 
 def test_verify_session_still_returns_plain_owner_id_unaffected_by_gen():
@@ -427,7 +427,7 @@ def test_full_relogin_cycle_after_logout_issues_working_token(
 
 @pytest.fixture
 def broken_generation_read(monkeypatch):
-    def _raise(_conn, _owner_id):
+    def _raise(_conn, _owner_id, _profile="default"):
         raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(store, "get_session_generation", _raise)

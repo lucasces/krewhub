@@ -58,7 +58,7 @@ def _merged_config(ext: Extension, stored: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def parse_form(
-    settings: Settings, owner_id: str, form: Mapping[str, str]
+    settings: Settings, owner_id: str, form: Mapping[str, str], *, profile: str = "default"
 ) -> tuple[dict[str, dict], dict[str, list[str]]]:
     """Lê os campos `ext.<id>.<chave>` do form do lobby. Devolve
     `(mudanças, erros)`: `mudanças[ext_id] = {enabled, config, secret_values}`
@@ -66,7 +66,7 @@ def parse_form(
     mensagens de validação (só quando a extensão está sendo habilitada)."""
     exts = registry.enabled_extensions(settings)
     with store.connect(settings.db_path) as conn:
-        rows = store.list_extensions(conn, owner_id)
+        rows = store.list_extensions(conn, owner_id, profile)
 
     changes: dict[str, dict] = {}
     errors: dict[str, list[str]] = {}
@@ -103,16 +103,16 @@ def parse_form(
     return changes, errors
 
 
-def save_form(settings: Settings, owner_id: str, changes: Mapping[str, dict]) -> None:
+def save_form(settings: Settings, owner_id: str, changes: Mapping[str, dict], *, profile: str = "default") -> None:
     """Persiste o que `parse_form` leu: config no SQLite, valores de
     campos `secret` direto no Secret do k8s (só marcadores no SQLite) e,
     ao DESABILITAR uma extensão, apaga as chaves dela do Secret."""
     if not changes:
         return
-    slug = tpl.slugify(owner_id)
+    slug = tpl.slugify(owner_id, profile)
     namespace = settings.dev_namespace
     with store.connect(settings.db_path) as conn:
-        rows = store.list_extensions(conn, owner_id)
+        rows = store.list_extensions(conn, owner_id, profile)
         needs_k8s = any(
             ch["secret_values"] or (rows.get(i, {}).get("enabled") and not ch["enabled"])
             for i, ch in changes.items()
@@ -128,9 +128,10 @@ def save_form(settings: Settings, owner_id: str, changes: Mapping[str, dict]) ->
             if prev and prev["enabled"] and not ch["enabled"] and c is not None:
                 k8s_manager.wipe_ext_secret_keys(c, namespace, slug, prefix=f"{ext_id}.")
                 secrets = {}
-                store.upsert_extension(conn, owner_id, ext_id, runtime_state={})
+                store.upsert_extension(conn, owner_id, ext_id, runtime_state={}, profile=profile)
             store.upsert_extension(
-                conn, owner_id, ext_id, enabled=ch["enabled"], config=ch["config"], secrets=secrets
+                conn, owner_id, ext_id, enabled=ch["enabled"], config=ch["config"], secrets=secrets,
+                profile=profile,
             )
 
 
@@ -139,13 +140,13 @@ def save_form(settings: Settings, owner_id: str, changes: Mapping[str, dict]) ->
 # ---------------------------------------------------------------------------
 
 
-def active_extensions(settings: Settings, owner_id: str) -> list[tuple[Extension, dict]]:
+def active_extensions(settings: Settings, owner_id: str, *, profile: str = "default") -> list[tuple[Extension, dict]]:
     """Habilitadas pelo admin E ligadas pelo dev, com config válida."""
     exts = registry.enabled_extensions(settings)
     if not exts:
         return []
     with store.connect(settings.db_path) as conn:
-        rows = store.list_extensions(conn, owner_id)
+        rows = store.list_extensions(conn, owner_id, profile)
     active = []
     for ext_id, ext in exts.items():
         row = rows.get(ext_id)
@@ -159,10 +160,10 @@ def active_extensions(settings: Settings, owner_id: str) -> list[tuple[Extension
     return active
 
 
-def build_plans(settings: Settings, owner_id: str) -> tuple[ExtPlan, ...]:
-    slug = tpl.slugify(owner_id)
+def build_plans(settings: Settings, owner_id: str, *, profile: str = "default") -> tuple[ExtPlan, ...]:
+    slug = tpl.slugify(owner_id, profile)
     plans = []
-    for ext, config in active_extensions(settings, owner_id):
+    for ext, config in active_extensions(settings, owner_id, profile=profile):
         contribution = ext.pod_contribution(
             BuildContext(
                 owner_id=owner_id,
@@ -271,10 +272,10 @@ def _derive(conditions: Mapping[str, bool]) -> str:
     return "ready" if all(conditions.values()) else "needs_action"
 
 
-def _persist_state(settings: Settings, owner_id: str, ext_id: str, before: Mapping, after: Mapping) -> None:
+def _persist_state(settings: Settings, owner_id: str, ext_id: str, before: Mapping, after: Mapping, *, profile: str = "default") -> None:
     if dict(before) != dict(after):
         with store.connect(settings.db_path) as conn:
-            store.upsert_extension(conn, owner_id, ext_id, runtime_state=dict(after))
+            store.upsert_extension(conn, owner_id, ext_id, runtime_state=dict(after), profile=profile)
 
 
 @dataclasses.dataclass
@@ -340,7 +341,8 @@ def _format_last_action(state: Mapping) -> str:
 
 
 def evaluate(
-    settings: Settings, owner_id: str, *, c: k8s_manager.Clients | None = None, only: str | None = None
+    settings: Settings, owner_id: str, *, c: k8s_manager.Clients | None = None, only: str | None = None,
+    profile: str = "default",
 ) -> list[ExtView]:
     """Estado + cartão de cada extensão habilitada pelo admin.
     Desligada pelo dev -> `inactive` (hook nunca chamado); Pod ausente ou
@@ -350,9 +352,9 @@ def evaluate(
         exts = {k: v for k, v in exts.items() if k == only}
     if not exts:
         return []
-    slug = tpl.slugify(owner_id)
+    slug = tpl.slugify(owner_id, profile)
     with store.connect(settings.db_path) as conn:
-        rows = store.list_extensions(conn, owner_id)
+        rows = store.list_extensions(conn, owner_id, profile)
 
     views: list[ExtView] = []
     snap: PodSnapshot | None = None
@@ -406,7 +408,7 @@ def evaluate(
             msg = str(exc) if isinstance(exc, ExtensionError) else type(exc).__name__
             conditions, state = dict(base), "error"
             card = Card(title=name, state="error", summary="Falha ao consultar o estado.", messages=(msg,))
-        _persist_state(settings, owner_id, ext_id, before, ctx.state)
+        _persist_state(settings, owner_id, ext_id, before, ctx.state, profile=profile)
         views.append(
             ExtView(ext_id, name, state, conditions, card,
                     _buttons(ext, conditions, usable=True, choices=choices), _format_last_action(ctx.state))
@@ -441,7 +443,8 @@ def _form_values(form: Mapping[str, Any], key: str) -> list[str]:
 
 
 def run_action(
-    settings: Settings, owner_id: str, ext_id: str, action_id: str, form: Mapping[str, str | Sequence[str]]
+    settings: Settings, owner_id: str, ext_id: str, action_id: str, form: Mapping[str, str | Sequence[str]],
+    *, profile: str = "default",
 ) -> ActionResult:
     exts = registry.enabled_extensions(settings)
     ext = exts.get(ext_id)
@@ -451,7 +454,7 @@ def run_action(
     if spec is None:
         raise ActionRejected("ação desconhecida", 404)
 
-    views = evaluate(settings, owner_id, only=ext_id)
+    views = evaluate(settings, owner_id, only=ext_id, profile=profile)
     view = views[0] if views else None
     if view is None or view.state in ("inactive", "pending"):
         raise ActionRejected("extensão não está ativa ou o workspace não está pronto", 409)
@@ -480,10 +483,10 @@ def run_action(
             raise ActionRejected(f"parâmetro {p.key!r} obrigatório")
         params[p.key] = value
 
-    slug = tpl.slugify(owner_id)
+    slug = tpl.slugify(owner_id, profile)
     c = k8s_manager.get_clients(settings)
     with store.connect(settings.db_path) as conn:
-        row = store.get_extension(conn, owner_id, ext_id) or {}
+        row = store.get_extension(conn, owner_id, ext_id, profile) or {}
     snap = pod_snapshot(c, settings.dev_namespace, slug)
     ctx = _make_context(settings, c, owner_id, slug, ext, row, _merged_config(ext, row.get("config", {})), snap)
     before = dict(ctx.state)
@@ -502,16 +505,16 @@ def run_action(
         "message": result.message,
         "at": datetime.now(timezone.utc).isoformat(),
     }
-    _persist_state(settings, owner_id, ext_id, before, ctx.state)
+    _persist_state(settings, owner_id, ext_id, before, ctx.state, profile=profile)
     return result
 
 
-def run_on_pod_ready(settings: Settings, owner_id: str, *, c: k8s_manager.Clients | None = None) -> None:
+def run_on_pod_ready(settings: Settings, owner_id: str, *, c: k8s_manager.Clients | None = None, profile: str = "default") -> None:
     """Melhor esforço: exceção de qualquer extensão só é logada."""
-    active = active_extensions(settings, owner_id)
+    active = active_extensions(settings, owner_id, profile=profile)
     if not active:
         return
-    slug = tpl.slugify(owner_id)
+    slug = tpl.slugify(owner_id, profile)
     c = c or k8s_manager.get_clients(settings)
     try:
         snap = pod_snapshot(c, settings.dev_namespace, slug)
@@ -519,7 +522,7 @@ def run_on_pod_ready(settings: Settings, owner_id: str, *, c: k8s_manager.Client
         logger.exception("on_pod_ready: falha lendo o Pod (owner=%s)", owner_id)
         return
     with store.connect(settings.db_path) as conn:
-        rows = store.list_extensions(conn, owner_id)
+        rows = store.list_extensions(conn, owner_id, profile)
     for ext, config in active:
         row = rows.get(ext.id) or {}
         ctx = _make_context(settings, c, owner_id, slug, ext, row, config, snap)
@@ -528,14 +531,14 @@ def run_on_pod_ready(settings: Settings, owner_id: str, *, c: k8s_manager.Client
             ext.on_pod_ready(ctx)
         except Exception:  # noqa: BLE001
             logger.exception("on_pod_ready da extensão %r falhou (owner=%s)", ext.id, owner_id)
-        _persist_state(settings, owner_id, ext.id, before, ctx.state)
+        _persist_state(settings, owner_id, ext.id, before, ctx.state, profile=profile)
 
 
-def on_pod_ready_best_effort(settings: Settings, owner_id: str, c: k8s_manager.Clients) -> None:
+def on_pod_ready_best_effort(settings: Settings, owner_id: str, c: k8s_manager.Clients, *, profile: str = "default") -> None:
     """`run_on_pod_ready` que nunca levanta -- falha de extensão não pode
     quebrar o provision do dev."""
     try:
-        run_on_pod_ready(settings, owner_id, c=c)
+        run_on_pod_ready(settings, owner_id, c=c, profile=profile)
     except Exception:  # noqa: BLE001
         logger.exception("on_pod_ready falhou (owner=%s)", owner_id)
 
@@ -546,7 +549,8 @@ def on_pod_ready_best_effort(settings: Settings, owner_id: str, c: k8s_manager.C
 
 
 def wipe_secrets(
-    settings: Settings, owner_id: str, *, generated_only: bool, c: k8s_manager.Clients | None = None
+    settings: Settings, owner_id: str, *, generated_only: bool, c: k8s_manager.Clients | None = None,
+    profile: str = "default",
 ) -> list[str]:
     """Remove chaves do Secret `krewhub-ext-<slug>` (merge patch com
     `null`) e zera o estado de runtime + marcadores correspondentes.
@@ -559,7 +563,7 @@ def wipe_secrets(
 
     Levanta `ApiException` em erro real; chamadores tratam como melhor
     esforço, igual à revogação de sessão."""
-    slug = tpl.slugify(owner_id)
+    slug = tpl.slugify(owner_id, profile)
     namespace = settings.dev_namespace
     c = c or k8s_manager.get_clients(settings)
 
@@ -576,9 +580,9 @@ def wipe_secrets(
 
     with store.connect(settings.db_path) as conn:
         wiped_set = set(wiped)
-        for ext_id, row in store.list_extensions(conn, owner_id).items():
+        for ext_id, row in store.list_extensions(conn, owner_id, profile).items():
             dropped = {k for k in row["secrets"] if secret_key(ext_id, k) in wiped_set}
-            store.reset_extension_runtime(conn, owner_id, ext_id, drop_secret_keys=dropped)
+            store.reset_extension_runtime(conn, owner_id, ext_id, drop_secret_keys=dropped, profile=profile)
     return wiped
 
 

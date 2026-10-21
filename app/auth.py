@@ -48,20 +48,25 @@ def _b64d(data: str) -> bytes:
     return base64.urlsafe_b64decode(padded)
 
 
-def sign_session(owner_id: str, *, secret: str, ttl_seconds: int, gen: int = 0) -> str:
+def sign_session(
+    owner_id: str, *, secret: str, ttl_seconds: int, gen: int = 0, profile: str = "default"
+) -> str:
     """Emite um token `<payload_b64>.<assinatura_b64>` -- payload =
-    {"owner_id", "exp", "gen"} (epoch, segundos; gen = geracao de
-    sessao atual do owner_id, ver app/store.py::get_session_generation).
-    `gen` default 0 cobre tanto "owner_id que nunca fez /logout"
-    quanto os testes/chamadores que nao precisam de revogacao (ver
-    tests/test_auth_tokens.py). Levanta AuthTokenError (nao finge
+    {"owner_id", "exp", "gen", "profile"} (epoch, segundos; gen = geracao
+    de sessao atual do (owner_id, profile), ver
+    app/store.py::get_session_generation). `gen` default 0 cobre tanto
+    "par (owner_id, profile) que nunca fez /logout" quanto os
+    testes/chamadores que nao precisam de revogacao (ver
+    tests/test_auth_tokens.py). `profile` default "default" cobre o
+    fluxo single-session de antes do multi-profile (e os tokens legados,
+    ver verify_session_payload). Levanta AuthTokenError (nao finge
     sucesso) se KREWHUB_SESSION_SECRET nao estiver configurada."""
     if not secret:
         raise AuthTokenError(
             "KREWHUB_SESSION_SECRET nao configurada -- nao da pra assinar sessao"
         )
     payload = json.dumps(
-        {"owner_id": owner_id, "exp": int(time.time()) + ttl_seconds, "gen": gen},
+        {"owner_id": owner_id, "exp": int(time.time()) + ttl_seconds, "gen": gen, "profile": profile},
         separators=(",", ":"),
     ).encode("utf-8")
     payload_b64 = _b64e(payload)
@@ -81,15 +86,18 @@ def verify_session(token: str, *, secret: str) -> str:
 
 def verify_session_payload(token: str, *, secret: str) -> dict:
     """Mesma validacao de `verify_session` (assinatura + expiracao),
-    mas devolve o payload inteiro ({"owner_id", "exp", "gen"}) em vez
-    de so owner_id -- usado por `app/main.py::_verify_session_checked`
-    pra comparar "gen" contra `store.get_session_generation`. Levanta
+    mas devolve o payload inteiro ({"owner_id", "exp", "gen", "profile"})
+    em vez de so owner_id -- usado por `app/main.py::_verify_session_checked`
+    pra comparar "gen" contra `store.get_session_generation` (no escopo
+    do "profile" embutido). Levanta
     AuthTokenError pra QUALQUER problema (malformado, assinatura
     errada, expirado, secret ausente) -- caller decide o status HTTP
     (401/403), esta funcao nunca devolve um payload nao confiavel.
     `gen` ausente (token de formato antigo, pre-migracao) vira 0 -- a
     mesma geracao de um owner_id sem linha em `session_generations`
-    (ver app/store.py::get_session_generation)."""
+    (ver app/store.py::get_session_generation); `profile` ausente (token
+    legado, pre-multi-profile) vira "default", o mesmo profile do fluxo
+    single-session de antes."""
     if not secret:
         raise AuthTokenError(
             "KREWHUB_SESSION_SECRET nao configurada -- nao da pra validar sessao"
@@ -123,4 +131,12 @@ def verify_session_payload(token: str, *, secret: str) -> dict:
     # entao `"gen": true` passaria como geracao 1.
     if type(gen) is not int:
         raise AuthTokenError("payload com 'gen' invalido")
-    return {"owner_id": owner_id, "exp": exp, "gen": gen}
+    # `profile` ausente (token legado, pre-multi-profile) vira "default"
+    # -- o mesmo profile do fluxo single-session de antes. Precisa ser
+    # str nao-vazia: um profile vazio/nao-string nunca casaria com um
+    # nome de profile real e abriria margem pra confusao de escopo de
+    # revogacao.
+    profile = payload.get("profile", "default")
+    if not isinstance(profile, str) or not profile:
+        raise AuthTokenError("payload com 'profile' invalido")
+    return {"owner_id": owner_id, "exp": exp, "gen": gen, "profile": profile}

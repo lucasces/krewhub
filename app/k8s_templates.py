@@ -78,8 +78,20 @@ OWNER_LABEL_KEY = "krewhub.pespa.net/owner-slug"
 _DEFAULT_PORT_FOR_SCHEME = {"http": "80", "https": "443"}
 
 
-def slugify(owner_id: str, *, max_len: int = 40) -> str:
-    """owner_id (email, claim, o que for) -> label DNS-1123 seguro.
+def _slugify_component(value: str, *, max_len: int, fallback_prefix: str) -> str:
+    slug = _SLUG_RE.sub("-", value.lower()).strip("-")
+    slug = slug[:max_len].strip("-")
+    if not slug:
+        # Sem nenhum char alfanumérico -- não fica vazio (label inválido),
+        # usa hash curto e estável em vez de falhar.
+        import hashlib
+
+        slug = f"{fallback_prefix}-" + hashlib.sha256(value.encode()).hexdigest()[:8]
+    return slug
+
+
+def slugify(owner_id: str, profile: str = "default", *, max_len: int = 40) -> str:
+    """(owner_id, profile) -> label DNS-1123 seguro, determinístico.
 
     Não é o owner_id "de verdade" -- achado de fatia anterior: kirocrew
     não valida essa identidade contra nada (é só credencial de Slack), a
@@ -87,19 +99,31 @@ def slugify(owner_id: str, *, max_len: int = 40) -> str:
     nomear recursos. Colapsar owner_id inteiro (incluindo domínio de
     email) no slug mantém 1 owner_id -> 1 slug determinístico.
 
+    Dimensão profile (multi-profile, ver app/store.py): um mesmo owner_id
+    pode ter N sessões provisionadas em paralelo (`default`, `work`, ...),
+    cada uma com seu próprio slug -- e é esse slug distinto que dá o
+    isolamento de infra (Pod/Service/NetworkPolicy/PVC/Secret/host/rota
+    CHP, todos nomeados a partir do slug). BACKWARD-COMPAT crítico: o
+    profile `default` devolve EXATAMENTE o slug de antes desta fatia
+    (nenhum sufixo), pra que os recursos já existentes no cluster casem
+    pelos mesmos nomes determinísticos sem recriação. Qualquer outro
+    profile ganha um sufixo `-<profile-slug>`.
+
     max_len=40 é deliberado: o slug entra em nomes de recurso (ex.
     `kirocrew-<slug>`, que precisa ser um nome de Service válido -- limite
     RFC 1035 de 63 chars) e em valor de label (limite k8s de 63 chars) --
-    40 deixa folga suficiente pros prefixos mais longos já usados aqui."""
-    slug = _SLUG_RE.sub("-", owner_id.lower()).strip("-")
-    slug = slug[:max_len].strip("-")
-    if not slug:
-        # owner_id sem nenhum char alfanumérico -- não fica vazio (label
-        # inválido), usa hash curto e estável em vez de falhar.
-        import hashlib
-
-        slug = "dev-" + hashlib.sha256(owner_id.encode()).hexdigest()[:8]
-    return slug
+    40 deixa folga suficiente pros prefixos mais longos já usados aqui.
+    Pra um profile != default, o orçamento de 40 é dividido: o owner_id
+    fica com `max_len - len(sufixo)` pra que o slug COMPLETO continue
+    dentro do mesmo limite."""
+    if profile == "default":
+        return _slugify_component(owner_id, max_len=max_len, fallback_prefix="dev")
+    profile_slug = _slugify_component(profile, max_len=12, fallback_prefix="p")
+    suffix = f"-{profile_slug}"
+    owner_slug = _slugify_component(
+        owner_id, max_len=max_len - len(suffix), fallback_prefix="dev"
+    )
+    return f"{owner_slug}{suffix}"
 
 
 def host_for(slug: str, settings: Settings) -> str:

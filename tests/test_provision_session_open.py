@@ -35,20 +35,23 @@ def mocked_infra(monkeypatch, settings):
     wait_for_ready, chp_client.register_route, session_client.issue_token_url."""
     from app.k8s_templates import host_for, slugify
 
-    def _reconcile(_settings, owner_id):
-        slug = slugify(owner_id)
+    def _reconcile(_settings, owner_id, profile="default"):
+        slug = slugify(owner_id, profile)
         host = host_for(slug, _settings)
-        return _fake_reconcile_result(owner_id, slug, _settings.dev_namespace, host)
+        result = _fake_reconcile_result(owner_id, slug, _settings.dev_namespace, host)
+        result["profile"] = profile
+        return result
 
     calls = {
         "reconcile": 0, "wait": 0, "register_route": 0, "issue_token": 0,
-        "allow_recreate": [], "pod_step": None,
+        "allow_recreate": [], "pod_step": None, "profile": [],
     }
 
-    def _reconcile_counted(_settings, owner_id, plans=(), *, allow_recreate=True):
+    def _reconcile_counted(_settings, owner_id, plans=(), *, allow_recreate=True, profile="default"):
         calls["reconcile"] += 1
         calls["allow_recreate"].append(allow_recreate)
-        result = _reconcile(_settings, owner_id)
+        calls["profile"].append(profile)
+        result = _reconcile(_settings, owner_id, profile)
         if calls["pod_step"]:
             result["steps"]["pod"] = calls["pod_step"]
         return result
