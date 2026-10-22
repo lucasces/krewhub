@@ -491,17 +491,23 @@ def reconcile_dev(
     ext_plans: tuple[ExtPlan, ...] = (),
     *,
     allow_recreate: bool = True,
+    profile: str = "default",
 ) -> dict:
-    """Idempotente: chamar de novo com o mesmo owner_id reaplica (patch) em
-    vez de duplicar. `allow_recreate=False` impede que o Pod seja derrubado
-    por mudança de spec (`steps["pod"] == "pending_update"`). Retorna o resultado ANTES de esperar o pod ficar
+    """Idempotente: chamar de novo com o mesmo (owner_id, profile) reaplica
+    (patch) em vez de duplicar. `allow_recreate=False` impede que o Pod seja
+    derrubado por mudança de spec (`steps["pod"] == "pending_update"`).
+    Retorna o resultado ANTES de esperar o pod ficar
     Ready -- quem chama decide se quer aguardar (`wait_for_ready`).
 
     Namespace é sempre `settings.dev_namespace` (COMPARTILHADO entre
-    todos os devs) -- não é mais derivado do slug do owner_id. Os demais
+    todos os devs E profiles) -- não é mais derivado do slug. Os demais
     recursos levam o slug no nome pra coexistir no mesmo namespace sem
-    colidir."""
-    slug = tpl.slugify(owner_id)
+    colidir; como o slug já embute o `profile` (ver
+    app/k8s_templates.py::slugify), dois profiles do MESMO owner_id geram
+    slugs distintos e portanto Pods/Services/PVCs/Secrets totalmente
+    separados -- é o que dá o isolamento das sessões em paralelo. O
+    profile `default` produz o slug de sempre (backward-compat)."""
+    slug = tpl.slugify(owner_id, profile)
     namespace = settings.dev_namespace
     host = tpl.host_for(slug, settings)
 
@@ -531,5 +537,15 @@ def reconcile_dev(
         body=tpl.build_pod(namespace, slug, settings, contributions),
         allow_recreate=allow_recreate,
     )
-    logger.info("reconcile owner_id=%s namespace=%s slug=%s steps=%s", owner_id, namespace, slug, steps)
-    return {"owner_id": owner_id, "slug": slug, "namespace": namespace, "host": host, "steps": steps}
+    logger.info(
+        "reconcile owner_id=%s profile=%s namespace=%s slug=%s steps=%s",
+        owner_id, profile, namespace, slug, steps,
+    )
+    return {
+        "owner_id": owner_id,
+        "profile": profile,
+        "slug": slug,
+        "namespace": namespace,
+        "host": host,
+        "steps": steps,
+    }

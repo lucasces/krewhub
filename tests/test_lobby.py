@@ -20,23 +20,25 @@ def mocked_infra(monkeypatch, settings):
     (via _do_provision) e kiro_login.start_device_flow -- cobre tudo que
     _run_lobby_session encadeia, sem tocar k8s/CHP/pod real."""
 
-    def _reconcile(_settings, owner_id):
-        slug = slugify(owner_id)
+    def _reconcile(_settings, owner_id, profile="default"):
+        slug = slugify(owner_id, profile)
         host = host_for(slug, _settings)
         return {
             "owner_id": owner_id,
+            "profile": profile,
             "slug": slug,
             "namespace": _settings.dev_namespace,
             "host": host,
             "steps": {"namespace": "exists", "pod": "created"},
         }
 
-    calls = {"reconcile": 0, "kiro_login": [], "allow_recreate": [], "pod_step": None}
+    calls = {"reconcile": 0, "kiro_login": [], "allow_recreate": [], "pod_step": None, "profile": []}
 
-    def _reconcile_counted(_settings, owner_id, plans=(), *, allow_recreate=True):
+    def _reconcile_counted(_settings, owner_id, plans=(), *, allow_recreate=True, profile="default"):
         calls["reconcile"] += 1
         calls["allow_recreate"].append(allow_recreate)
-        result = _reconcile(_settings, owner_id)
+        calls["profile"].append(profile)
+        result = _reconcile(_settings, owner_id, profile)
         if calls["pod_step"]:
             result["steps"]["pod"] = calls["pod_step"]
         return result
@@ -142,7 +144,7 @@ def test_apply_update_requires_its_own_csrf_token(client, mocked_infra, sign_coo
     assert client.post(url, data={}, follow_redirects=False).status_code == 403
     lobby_token = main._lobby_csrf("dev-a@test.local")  # token do POST /lobby não vale aqui
     assert client.post(url, data={"csrf": lobby_token}, follow_redirects=False).status_code == 403
-    other = runtime.make_csrf(settings.session_secret, "dev-b@test.local", "_lobby", "update")
+    other = runtime.make_csrf(settings.session_secret, "dev-b@test.local", "_lobby", "update:default")
     assert client.post(url, data={"csrf": other}, follow_redirects=False).status_code == 403
     assert mocked_infra["reconcile"] == 0
 
@@ -151,7 +153,7 @@ def test_apply_update_recreates_and_redirects_back_to_the_lobby(client, mocked_i
     from app.extensions import runtime
 
     client.cookies.set("krewhub_session", sign_cookie("dev-a@test.local"))
-    token = runtime.make_csrf(settings.session_secret, "dev-a@test.local", "_lobby", "update")
+    token = runtime.make_csrf(settings.session_secret, "dev-a@test.local", "_lobby", "update:default")
     r = client.post("/devs/dev-a%40test.local/lobby/apply-update", data={"csrf": token}, follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/devs/dev-a@test.local/lobby"

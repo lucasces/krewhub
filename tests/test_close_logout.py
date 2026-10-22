@@ -279,11 +279,12 @@ def test_provision_after_close_reconciles_again_with_same_slug_and_namespace(
     from app import chp_client, k8s_manager as k8sm, session_client as sc
     from app.k8s_templates import host_for, slugify
 
-    def _fake_reconcile(_settings, owner_id):
-        slug = slugify(owner_id)
+    def _fake_reconcile(_settings, owner_id, plans=(), *, allow_recreate=True, profile="default"):
+        slug = slugify(owner_id, profile)
         host = host_for(slug, _settings)
         return {
             "owner_id": owner_id,
+            "profile": profile,
             "slug": slug,
             "namespace": _settings.dev_namespace,
             "host": host,

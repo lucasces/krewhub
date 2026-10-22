@@ -124,7 +124,7 @@ def test_lobby_form_embeds_a_csrf_token_bound_to_the_owner(ext_client, login, in
     login(client)
     html_text = client.get(f"{URL}/lobby").text
     token = re.search(r'name="csrf" value="([^"]+)"', html_text).group(1)
-    assert runtime.verify_csrf(s.session_secret, token, OWNER, "_lobby", "save")
+    assert runtime.verify_csrf(s.session_secret, token, OWNER, "_lobby", "save:default")
 
 
 def test_lobby_post_without_csrf_token_is_403_and_changes_nothing(ext_client, login, infra, fake_clients):
@@ -217,7 +217,7 @@ def test_extensions_cards_render_with_refresh_while_pending(ext_client, login, f
 
 
 def _token(s, action):
-    return runtime.make_csrf(s.session_secret, OWNER, "demo", action)
+    return runtime.make_csrf(s.session_secret, OWNER, "demo", f"{action}:default")
 
 
 def test_action_requires_csrf_for_cookie_sessions(ext_client, login, fake_clients):

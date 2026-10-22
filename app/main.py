@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 import sqlite3
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -109,6 +110,39 @@ _pending_logins: dict[str, str] = {}
 # rationale de token interno assinado vs. access_token do Keycloak).
 AUTH_COOKIE_NAME = "krewhub_session"
 
+# Multi-profile: um mesmo owner_id pode ter N sessoes de dev
+# provisionadas em paralelo (ex.: "default", "work"), cada uma isolada
+# (ver app/store.py e app/k8s_templates.py::slugify). Um owner_id sem
+# profile explicito cai no DEFAULT_PROFILE e tem o comportamento
+# single-session de antes desta fatia, bit-a-bit.
+DEFAULT_PROFILE = store.DEFAULT_PROFILE
+
+# Um nome de profile vira slug DNS-1123 (ver slugify), entra em nome de
+# recurso k8s e em host -- restringido ao mesmo alfabeto pra que
+# "home"/"Home" nao sejam dois profiles diferentes apontando pro mesmo
+# slug, e pra barrar lixo/injecao de path. 1..32 chars, [a-z0-9-],
+# comecando e terminando por alfanumerico.
+_PROFILE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$")
+
+
+def _resolve_profile(profile: str | None) -> str:
+    """Normaliza o `?profile=` dos endpoints de dev. Ausente/vazio ->
+    DEFAULT_PROFILE (comportamento de antes). Presente -> precisa casar
+    `_PROFILE_RE` (senao 400): e o unico ponto de entrada de um nome de
+    profile vindo de fora, entao a validacao mora aqui, nao espalhada."""
+    if not profile:
+        return DEFAULT_PROFILE
+    profile = profile.strip().lower()
+    if not _PROFILE_RE.match(profile):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "profile invalido -- use 1..32 chars [a-z0-9-], comecando e "
+                "terminando por alfanumerico (ex.: 'default', 'work', 'home-2')"
+            ),
+        )
+    return profile
+
 
 class AuthRedirect(Exception):
     """Levantada pela dependencia de auth quando quem bateu na rota foi
@@ -138,22 +172,29 @@ def _extract_token(request: Request) -> str | None:
     return request.cookies.get(AUTH_COOKIE_NAME)
 
 
-def _verify_session_checked(token: str) -> str:
+def _verify_session_checked(token: str) -> tuple[str, str]:
     """Valida o token (assinatura + expiracao, via
     `auth.verify_session_payload`) E confere que a geracao embutida
-    nele ainda bate com a geracao atual persistida pro owner_id
-    (tabela `session_generations`, ver app/store.py) -- e o que da revogacao de
+    nele ainda bate com a geracao atual persistida pro
+    (owner_id, profile) do token (tabela `session_generations`, ver
+    app/store.py) -- e o que da revogacao de
     verdade pro `krewhub_session` (issue #2): um token assinado ANTES
-    de um `/logout` (que incrementa a geracao) passa a falhar aqui,
-    mesmo com assinatura/expiracao ainda validas.
+    de um `/logout` (que incrementa a geracao do profile) passa a falhar
+    aqui, mesmo com assinatura/expiracao ainda validas. A revogacao e
+    POR profile (multi-profile): um /logout no profile "work" invalida so
+    os tokens de "work", nunca os de "home".
+
+    Devolve `(owner_id, profile)` -- o profile vem do PROPRIO token
+    (payload), nunca de query param, pra que a checagem de geracao e o
+    escopo de qualquer acao derivada sejam os da sessao que assinou o
+    token. Tokens legados (pre-multi-profile, sem "profile") caem em
+    profile "default" (ver app/auth.py::verify_session_payload).
 
     Levanta `auth.AuthTokenError` pros dois casos (mesmo tipo de
-    excecao de sempre) -- os tres call sites (`root`, `require_session`,
+    excecao de sempre) -- os call sites (`root`, `require_session`,
     `logout`) ja tratam esse tipo de erro do jeito certo pra cada um
     (401, 302 pro /login, ou melhor-esforco). Uma falha ao LER a geracao
-    no SQLite propaga como `sqlite3.Error` -- nao e credencial invalida,
-    entao cada call site trata a parte (503 em `require_session`; "nao
-    verificado" em `root`/`logout`).
+    no SQLite propaga como `sqlite3.Error`.
 
     Checagem de geracao deliberadamente FORA de app/auth.py -- mantem
     aquele modulo um validador puro de HMAC/expiracao, sem dependencia
@@ -161,16 +202,17 @@ def _verify_session_checked(token: str) -> str:
     nenhum)."""
     payload = auth.verify_session_payload(token, secret=_settings.session_secret)
     owner_id = payload["owner_id"]
+    profile = payload["profile"]
     with store.connect(_settings.db_path) as conn:
-        current_gen = store.get_session_generation(conn, owner_id)
+        current_gen = store.get_session_generation(conn, owner_id, profile)
     if payload["gen"] != current_gen:
         raise auth.AuthTokenError(
             f"sessao revogada -- geracao do token ({payload['gen']}) nao bate "
-            f"com a atual ({current_gen}) pro owner_id '{owner_id}', "
-            "provavelmente por causa de um /logout depois deste token ter "
-            "sido emitido"
+            f"com a atual ({current_gen}) pro owner_id '{owner_id}' profile "
+            f"'{profile}', provavelmente por causa de um /logout depois deste "
+            "token ter sido emitido"
         )
-    return owner_id
+    return owner_id, profile
 
 
 def require_session(request: Request) -> str:
@@ -199,7 +241,8 @@ def require_session(request: Request) -> str:
             ),
         )
     try:
-        return _verify_session_checked(token)
+        owner_id, _profile = _verify_session_checked(token)
+        return owner_id
     except auth.AuthTokenError as exc:
         if _wants_html(request):
             raise AuthRedirect("/login") from exc
@@ -232,6 +275,39 @@ def require_owner(owner_id: str, request: Request) -> str:
             ),
         )
     return token_owner_id
+
+
+def require_session_profile(request: Request) -> tuple[str, str]:
+    """Como `require_session`, mas devolve `(owner_id, profile)` -- o
+    profile vem do PROPRIO token, nunca de query param. Usado por `/close`
+    (e, pela mesma logica, `/logout` le o profile direto do token), pra
+    que a acao recaia exatamente sobre a sessao que o cookie/Bearer
+    representa: um cookie de `work` fecha o pod de `work`, nao o de
+    `home`. Mesma regra de credencial ausente/invalida de
+    `require_session` (401, 302 pro /login, ou 503 no SQLite)."""
+    token = _extract_token(request)
+    if not token:
+        if _wants_html(request):
+            raise AuthRedirect("/login")
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "credencial ausente -- cookie 'krewhub_session' (via /login) ou "
+                "header 'Authorization: Bearer <token>'"
+            ),
+        )
+    try:
+        return _verify_session_checked(token)
+    except auth.AuthTokenError as exc:
+        if _wants_html(request):
+            raise AuthRedirect("/login") from exc
+        raise HTTPException(status_code=401, detail=f"credencial invalida: {exc}") from exc
+    except sqlite3.Error as exc:
+        logger.error("falha ao ler a geracao de sessao no SQLite", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="verificacao de sessao indisponivel (falha no SQLite) -- tente de novo",
+        ) from exc
 
 
 @app.get("/healthz")
@@ -269,7 +345,7 @@ def root(request: Request) -> RedirectResponse:
     owner_id: str | None = None
     if token:
         try:
-            owner_id = _verify_session_checked(token)
+            owner_id, _profile = _verify_session_checked(token)
         except auth.AuthTokenError:
             owner_id = None
         except sqlite3.Error:
@@ -388,7 +464,7 @@ def callback(
     return redirect
 
 
-def _cleanup_extensions(owner_id: str, c, *, all_secrets: bool) -> None:
+def _cleanup_extensions(owner_id: str, c, *, all_secrets: bool, profile: str = DEFAULT_PROFILE) -> None:
     """Parte de extensões do `/close`/`/logout`: remove o ConfigMap de
     arquivos e apaga chaves do Secret `krewhub-ext-<slug>` (merge patch
     com `null`; o RBAC não tem `delete` em secrets) -- TODAS no
@@ -397,16 +473,16 @@ def _cleanup_extensions(owner_id: str, c, *, all_secrets: bool) -> None:
     e sem estado salvo pro dev, não toca no cluster."""
     try:
         with store.connect(_settings.db_path) as conn:
-            has_state = bool(store.list_extensions(conn, owner_id))
+            has_state = bool(store.list_extensions(conn, owner_id, profile))
         if not has_state and not ext_registry.enabled_extensions(_settings):
             return
-        k8s_manager.teardown_ext_resources(c, _settings.dev_namespace, tpl.slugify(owner_id))
-        ext_runtime.wipe_secrets(_settings, owner_id, generated_only=not all_secrets, c=c)
+        k8s_manager.teardown_ext_resources(c, _settings.dev_namespace, tpl.slugify(owner_id, profile))
+        ext_runtime.wipe_secrets(_settings, owner_id, generated_only=not all_secrets, c=c, profile=profile)
     except Exception:
-        logger.warning("limpeza das extensões falhou pra owner_id=%s", owner_id, exc_info=True)
+        logger.warning("limpeza das extensões falhou pra owner_id=%s profile=%s", owner_id, profile, exc_info=True)
 
 
-def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> dict:
+def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False, profile: str = DEFAULT_PROFILE) -> dict:
     """Núcleo reaproveitado por `GET /close` (reporta erro pro chamador,
     via HTTP) e `GET /logout` (melhor esforço -- uma falha aqui NÃO pode
     impedir o logout do KrewHub em si, ver `logout` abaixo).
@@ -447,14 +523,14 @@ def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> 
     de extensão no Secret. `wipe_all_ext_secrets=True` (só `/logout`)
     apaga todas as chaves; `/close` apaga só as geradas."""
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get(conn, owner_id, profile)
     if row is None:
         if wipe_all_ext_secrets:
             try:
-                _cleanup_extensions(owner_id, k8s_manager.get_clients(_settings), all_secrets=True)
+                _cleanup_extensions(owner_id, k8s_manager.get_clients(_settings), all_secrets=True, profile=profile)
             except Exception:
-                logger.warning("limpeza das extensões falhou pra owner_id=%s", owner_id, exc_info=True)
-        raise ValueError(f"owner_id={owner_id!r} não provisionado")
+                logger.warning("limpeza das extensões falhou pra owner_id=%s profile=%s", owner_id, profile, exc_info=True)
+        raise ValueError(f"owner_id={owner_id!r} profile={profile!r} não provisionado")
 
     c = k8s_manager.get_clients(_settings)
 
@@ -464,8 +540,8 @@ def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> 
         revoked = True
     except session_client.SessionError as exc:
         logger.warning(
-            "revogação do kirocrew falhou pra owner_id=%s -- seguindo com o teardown mesmo assim: %s",
-            owner_id, exc,
+            "revogação do kirocrew falhou pra owner_id=%s profile=%s -- seguindo com o teardown mesmo assim: %s",
+            owner_id, profile, exc,
         )
 
     try:
@@ -473,12 +549,13 @@ def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> 
             c, namespace=row["namespace"], slug=row["slug"]
         )
     finally:
-        _cleanup_extensions(owner_id, c, all_secrets=wipe_all_ext_secrets)
+        _cleanup_extensions(owner_id, c, all_secrets=wipe_all_ext_secrets, profile=profile)
 
     with store.connect(_settings.db_path) as conn:
         store.upsert(
             conn,
             owner_id=owner_id,
+            profile=profile,
             slug=row["slug"],
             namespace=row["namespace"],
             host=row["host"],
@@ -490,7 +567,7 @@ def _close_dev_session(owner_id: str, *, wipe_all_ext_secrets: bool = False) -> 
 
 
 @app.get("/close", response_class=HTMLResponse)
-def close_session(owner_id: str = Depends(require_session)) -> HTMLResponse:
+def close_session(session: tuple[str, str] = Depends(require_session_profile)) -> HTMLResponse:
     """Desliga o workload k8s deste dev -- Pod, Service,
     NetworkPolicy e ConfigMap deletados (workspace/histórico/login do
     kiro-cli sobrevivem no PVC, que NÃO é tocado, ver `_close_dev_session`).
@@ -509,7 +586,8 @@ def close_session(owner_id: str = Depends(require_session)) -> HTMLResponse:
     (idempotente, mesmo PVC) e reautentica rápido, sem precisar refazer
     o ciclo OIDC nem o `kiro-cli login`."""
     try:
-        _close_dev_session(owner_id)
+        owner_id, profile = session
+        _close_dev_session(owner_id, profile=profile)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except k8s_manager.TeardownError as exc:
@@ -571,9 +649,10 @@ def logout(request: Request) -> RedirectResponse:
     tentar a revogação/teardown também)."""
     token = _extract_token(request)
     owner_id: str | None = None
+    profile: str = DEFAULT_PROFILE
     if token:
         try:
-            owner_id = _verify_session_checked(token)
+            owner_id, profile = _verify_session_checked(token)
         except auth.AuthTokenError:
             owner_id = None
         except sqlite3.Error:
@@ -589,26 +668,29 @@ def logout(request: Request) -> RedirectResponse:
         # abaixo dar certo: justamente com a infra fora do ar, o token
         # antigo tem que deixar de valer. Uma falha aqui (SQLite
         # indisponivel) nao pode impedir o logout do KrewHub em si
-        # (limpar cookie + redirect).
+        # (limpar cookie + redirect). Revogacao e POR profile
+        # (multi-profile): o /logout deste cookie incrementa SO a
+        # geracao do profile que o token carrega -- as outras sessoes do
+        # mesmo owner_id (outros profiles) seguem validas.
         try:
             with store.connect(_settings.db_path) as conn:
-                store.bump_session_generation(conn, owner_id)
+                store.bump_session_generation(conn, owner_id, profile)
         except sqlite3.Error:
             logger.error(
-                "falha ao incrementar a geracao de sessao no /logout pra owner_id=%s",
-                owner_id,
+                "falha ao incrementar a geracao de sessao no /logout pra owner_id=%s profile=%s",
+                owner_id, profile,
                 exc_info=True,
             )
         # Teardown melhor esforco -- QUALQUER excecao (nao so
         # TeardownError: get_clients pode levantar RuntimeError com
         # kubeconfig/cluster indisponivel) so e logada.
         try:
-            _close_dev_session(owner_id, wipe_all_ext_secrets=True)
+            _close_dev_session(owner_id, wipe_all_ext_secrets=True, profile=profile)
         except ValueError:
-            logger.info("/logout pra owner_id=%s sem workload provisionado -- nada a desligar", owner_id)
+            logger.info("/logout pra owner_id=%s profile=%s sem workload provisionado -- nada a desligar", owner_id, profile)
         except Exception:
             logger.warning(
-                "revogação/teardown falhou no /logout pra owner_id=%s", owner_id, exc_info=True
+                "revogação/teardown falhou no /logout pra owner_id=%s profile=%s", owner_id, profile, exc_info=True
             )
 
     redirect = RedirectResponse("/login", status_code=302)
@@ -627,11 +709,18 @@ def logout(request: Request) -> RedirectResponse:
     return redirect
 
 
-def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = True) -> dict:
+def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = True, profile: str = DEFAULT_PROFILE) -> dict:
     """Núcleo do reconcile -- extraído pra ser reaproveitado por
     `POST /devs/{owner_id}/provision` (chamada direta, uso de
     script/CI) e por `POST /devs/{owner_id}/lobby` (encadeado
     automaticamente depois que o dev escolhe as opções da sessão).
+
+    `profile` (multi-profile): qual sessão do owner_id provisionar. Cada
+    profile tem seu próprio slug/namespace-resources/host/registro no
+    SQLite, então dois profiles do mesmo owner_id coexistem no cluster,
+    totalmente isolados (ver app/k8s_templates.py::slugify e
+    app/k8s_manager.py::reconcile_dev). `default` = comportamento de
+    antes.
 
     `allow_recreate=False` é o modo dos caminhos GET (`/open`, lobby): se o
     spec do Pod mudou (extensão, imagem), o Pod em uso NÃO é derrubado --
@@ -643,9 +732,11 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
 
     # Só passa os planos / a flag quando necessário (o reconcile sem
     # extensões e com recriação liberada segue exatamente como era).
-    reconcile_kwargs = {} if allow_recreate else {"allow_recreate": False}
+    reconcile_kwargs = {"profile": profile}
+    if not allow_recreate:
+        reconcile_kwargs["allow_recreate"] = False
     try:
-        plans = ext_runtime.build_plans(_settings, owner_id)
+        plans = ext_runtime.build_plans(_settings, owner_id, profile=profile)
         result = (
             k8s_manager.reconcile_dev(_settings, owner_id, plans, **reconcile_kwargs)
             if plans
@@ -654,7 +745,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
     except ContributionError as exc:
         raise HTTPException(status_code=422, detail=f"extensão inválida: {exc}") from exc
     except k8s_manager.PodRecreationError as exc:
-        logger.warning("recriação do pod de owner_id=%s não terminou: %s", owner_id, exc)
+        logger.warning("recriação do pod de owner_id=%s profile=%s não terminou: %s", owner_id, profile, exc)
         raise HTTPException(
             status_code=503,
             detail=(
@@ -669,6 +760,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
         store.upsert(
             conn,
             owner_id=owner_id,
+            profile=profile,
             slug=result["slug"],
             namespace=namespace,
             host=result["host"],
@@ -684,6 +776,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
             store.upsert(
                 conn,
                 owner_id=owner_id,
+                profile=profile,
                 slug=result["slug"],
                 namespace=namespace,
                 host=result["host"],
@@ -696,7 +789,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
                 detail=f"pod em {namespace} não ficou Ready dentro do timeout",
             )
         if plans:
-            ext_runtime.on_pod_ready_best_effort(_settings, owner_id, c)
+            ext_runtime.on_pod_ready_best_effort(_settings, owner_id, c, profile=profile)
 
     target = chp_client.dev_target(result["slug"], namespace)
     c = k8s_manager.get_clients(_settings)
@@ -707,6 +800,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
             store.upsert(
                 conn,
                 owner_id=owner_id,
+                profile=profile,
                 slug=result["slug"],
                 namespace=namespace,
                 host=result["host"],
@@ -719,6 +813,7 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
         store.upsert(
             conn,
             owner_id=owner_id,
+            profile=profile,
             slug=result["slug"],
             namespace=namespace,
             host=result["host"],
@@ -746,9 +841,9 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
             ttl=_settings.session_ttl,
         )
         with store.connect(_settings.db_path) as conn:
-            store.mark_token_issued(conn, owner_id)
+            store.mark_token_issued(conn, owner_id, profile)
     except session_client.SessionError as exc:
-        logger.warning("emissão de token falhou pra owner_id=%s: %s", owner_id, exc)
+        logger.warning("emissão de token falhou pra owner_id=%s profile=%s: %s", owner_id, profile, exc)
 
     return {
         **result,
@@ -760,23 +855,37 @@ def _do_provision(owner_id: str, *, wait: bool = True, allow_recreate: bool = Tr
 
 
 @app.post("/devs/{owner_id}/provision")
-def provision(owner_id: str, wait: bool = True, _owner: str = Depends(require_owner)) -> dict:
+def provision(
+    owner_id: str,
+    wait: bool = True,
+    profile: str | None = Query(None, description="Profile da sessão a provisionar (multi-profile); ausente = 'default'"),
+    _owner: str = Depends(require_owner),
+) -> dict:
     """Reconcile idempotente do pod-por-dev + registro de rota no CHP +
     persistência. `owner_id` por enquanto é só uma string simulando o
     pós-login (achado de uma fatia anterior: não precisa ser um claim OIDC
-    real -- kirocrew não valida essa identidade contra nada)."""
-    return _do_provision(owner_id, wait=wait)
+    real -- kirocrew não valida essa identidade contra nada).
+
+    `?profile=` (multi-profile): provisiona uma sessão NOMEADA do owner_id,
+    coexistente em paralelo com as outras. Ausente = `default` (fluxo de
+    sempre)."""
+    return _do_provision(owner_id, wait=wait, profile=_resolve_profile(profile))
 
 
 @app.post("/devs/{owner_id}/session")
-def new_session(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+def new_session(
+    owner_id: str,
+    profile: str | None = Query(None, description="Profile cuja sessão reemitir; ausente = 'default'"),
+    _owner: str = Depends(require_owner),
+) -> dict:
     """Reemissão sob demanda -- útil quando a sessão anterior expirou (o
     LINK expira em ~5min se não clicado; a sessão criada após o clique
     dura o `--ttl` passado a `kirocrew token`, hoje `KREWHUB_SESSION_TTL`).
     Não requer que /provision tenha sido chamado antes NESTA execução do
     processo, só que o namespace já exista (senão 404)."""
+    profile = _resolve_profile(profile)
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get(conn, owner_id, profile)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
@@ -794,13 +903,17 @@ def new_session(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     with store.connect(_settings.db_path) as conn:
-        store.mark_token_issued(conn, owner_id)
+        store.mark_token_issued(conn, owner_id, profile)
 
-    return {"owner_id": owner_id, "dashboard_url_with_token": url}
+    return {"owner_id": owner_id, "profile": profile, "dashboard_url_with_token": url}
 
 
 @app.get("/devs/{owner_id}/open")
-def open_dashboard(owner_id: str, _owner: str = Depends(require_owner)) -> RedirectResponse:
+def open_dashboard(
+    owner_id: str,
+    profile: str | None = Query(None, description="Profile da sessão a abrir; ausente = 'default'"),
+    _owner: str = Depends(require_owner),
+) -> RedirectResponse:
     """Entrypoint pensado pra ser aberto direto no navegador: reconcilia
     o workload (idempotente, `_do_provision` -- rápido quando o pod já
     existe) e devolve HTTP 302 pra URL já autenticada -- simula "login
@@ -826,16 +939,21 @@ def open_dashboard(owner_id: str, _owner: str = Depends(require_owner)) -> Redir
     Este GET nunca recria o Pod: se o spec mudou desde a criação do Pod
     atual (extensão habilitada, imagem nova), redireciona (303) pro lobby,
     que mostra "atualização pendente" e a ação POST que aplica."""
+    profile = _resolve_profile(profile)
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get(conn, owner_id, profile)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
-    result = _do_provision(owner_id, wait=True, allow_recreate=False)
+    result = _do_provision(owner_id, wait=True, allow_recreate=False, profile=profile)
     if result["update_pending"]:
         # GET nunca derruba o Pod em uso: o lobby explica a pendência e
-        # oferece o POST que aplica a atualização.
-        return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby", status_code=303)
+        # oferece o POST que aplica a atualização. Carrega o profile no
+        # redirect pra o lobby agir sobre a MESMA sessão.
+        lobby = f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby"
+        if profile != DEFAULT_PROFILE:
+            lobby += f"?profile={urllib.parse.quote(profile, safe='')}"
+        return RedirectResponse(lobby, status_code=303)
     url = result.get("dashboard_url_with_token")
     if not url:
         raise HTTPException(status_code=502, detail="emissão de token falhou -- ver logs do serviço")
@@ -854,6 +972,7 @@ def kiro_login_start(
         None, description="Start URL do Identity Center -- só usado com mode=org"
     ),
     region: str | None = Query(None, description="Region -- só usado com mode=org"),
+    profile: str | None = Query(None, description="Profile da sessão alvo; ausente = 'default'"),
     _owner: str = Depends(require_owner),
 ) -> dict:
     """Automatiza o `kiro-cli login` (device-flow) que até esta fatia era
@@ -879,8 +998,9 @@ def kiro_login_start(
             detail=f"parâmetro 'mode' obrigatório e deve ser um de {kiro_login.MODES} -- sem default implícito",
         )
 
+    profile = _resolve_profile(profile)
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get(conn, owner_id, profile)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
 
@@ -912,7 +1032,7 @@ def kiro_login_start(
     except kiro_login.KiroLoginError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    return {"owner_id": owner_id, "mode": mode, **result}
+    return {"owner_id": owner_id, "profile": profile, "mode": mode, **result}
 
 
 async def _form_fields(request: Request) -> dict[str, str]:
@@ -940,7 +1060,7 @@ async def _form_fields_multi(request: Request) -> dict[str, str | list[str]]:
     return fields
 
 
-def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = None) -> str:
+def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = None, *, profile: str = DEFAULT_PROFILE) -> str:
     """Seção "Extensões" do form do lobby: uma caixa por extensão
     habilitada pelo admin (vazio se nenhuma). Valores de campos `secret`
     nunca voltam preenchidos."""
@@ -948,23 +1068,30 @@ def _extensions_form_html(owner_id: str, errors: dict[str, list[str]] | None = N
     if not exts:
         return ""
     with store.connect(_settings.db_path) as conn:
-        rows = store.list_extensions(conn, owner_id)
+        rows = store.list_extensions(conn, owner_id, profile)
     return ext_ui.render_config_section(
         [(ext, rows.get(ext_id), (errors or {}).get(ext_id, [])) for ext_id, ext in exts.items()]
     )
 
 
 # Escopo do token anti-CSRF do form do lobby. Começa com "_" pra nunca
-# colidir com o id de uma extensão (ids casam `^[a-z]...`).
-_LOBBY_CSRF_SCOPE = ("_lobby", "save")
-_UPDATE_CSRF_SCOPE = ("_lobby", "update")
+# colidir com o id de uma extensão (ids casam `^[a-z]...`). O profile
+# entra no escopo (multi-profile): um token gerado pro lobby do profile
+# "work" NÃO vale pro lobby do profile "home" do mesmo owner -- cada
+# sessão tem seu próprio token anti-CSRF.
+def _lobby_csrf_scope(profile: str) -> tuple[str, str]:
+    return ("_lobby", f"save:{profile}")
 
 
-def _lobby_csrf(owner_id: str) -> str:
-    return ext_runtime.make_csrf(_settings.session_secret, owner_id, *_LOBBY_CSRF_SCOPE)
+def _update_csrf_scope(profile: str) -> tuple[str, str]:
+    return ("_lobby", f"update:{profile}")
 
 
-def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dict | None = None) -> str:
+def _lobby_csrf(owner_id: str, profile: str = DEFAULT_PROFILE) -> str:
+    return ext_runtime.make_csrf(_settings.session_secret, owner_id, *_lobby_csrf_scope(profile))
+
+
+def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dict | None = None, profile: str = DEFAULT_PROFILE) -> str:
     """HTML puro (sem JS/framework) -- form de escolha da sessão, servido
     ANTES do provision rodar. `identity_provider`/`region` vêm
     pré-preenchidos com o default de KREWHUB_KIRO_IDENTITY_PROVIDER/
@@ -976,17 +1103,35 @@ def _lobby_form_html(owner_id: str, *, error: str | None = None, ext_errors: dic
     )
     default_ip = html.escape(_settings.kiro_identity_provider)
     default_region = html.escape(_settings.kiro_region)
-    extensions_html = _extensions_form_html(owner_id, ext_errors)
-    csrf = html.escape(_lobby_csrf(owner_id))
+    extensions_html = _extensions_form_html(owner_id, ext_errors, profile=profile)
+    csrf = html.escape(_lobby_csrf(owner_id, profile))
+    # O profile viaja no form (hidden) pro POST agir sobre a MESMA sessão
+    # -- e o action do form carrega o profile na query pro default ficar
+    # SEM query string (backward-compat de URL/testes).
+    action = f"/devs/{owner_id_html}/lobby"
+    if profile != DEFAULT_PROFILE:
+        action += f"?profile={html.escape(urllib.parse.quote(profile, safe=''))}"
+    profile_field = (
+        f'<input type="hidden" name="profile" value="{html.escape(profile)}">'
+        if profile != DEFAULT_PROFILE
+        else ""
+    )
+    profile_note = (
+        f'<p style="font-size:0.85em;color:#666">Perfil desta sessão: <code>{html.escape(profile)}</code></p>'
+        if profile != DEFAULT_PROFILE
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="pt-br">
 <head><meta charset="utf-8"><title>KrewHub -- nova sessão</title></head>
 <body style="font-family: sans-serif; max-width: 640px; margin: 2rem auto;">
   <h1>Configurar sua sessão</h1>
   <p>Dev: <code>{owner_id_html}</code></p>
+  {profile_note}
   {error_html}
-  <form method="post" action="/devs/{owner_id_html}/lobby">
+  <form method="post" action="{action}">
     <input type="hidden" name="csrf" value="{csrf}">
+    {profile_field}
     <fieldset>
       <legend>Como você vai logar no <code>kiro-cli</code>?</legend>
       <label><input type="radio" name="login_mode" value="org" required> Pro (organização / Identity Center SSO)</label><br>
@@ -1017,6 +1162,7 @@ def _lobby_result_html(
     kiro_error: str | None,
     extensions_html: str = "",
     update_pending: bool = False,
+    profile: str = DEFAULT_PROFILE,
 ) -> str:
     """Ordem deliberada: login do kiro-cli PRIMEIRO, dashboard DEPOIS --
     sem o login completo, o dashboard mostra a tela de "sandbox
@@ -1065,9 +1211,12 @@ def _lobby_result_html(
     # Service/NetworkPolicy/ConfigMap), não só invalidam um link -- essa
     # é a mudança de design desta fatia (ver docs/ARCHITECTURE.md,
     # seção "`/close` vs `/logout`").
+    reconfigure_qs = "?reconfigure=1"
+    if profile != DEFAULT_PROFILE:
+        reconfigure_qs += f"&profile={html.escape(urllib.parse.quote(profile, safe=''))}"
     session_links_html = (
         f'<p style="margin-top:2rem">'
-        f'<a href="/devs/{owner_id_html}/lobby?reconfigure=1" style="font-size:0.85em;color:#666">'
+        f'<a href="/devs/{owner_id_html}/lobby{reconfigure_qs}" style="font-size:0.85em;color:#666">'
         "Reconfigurar sessão</a>"
         ' &nbsp;|&nbsp; '
         '<a href="/close" style="font-size:0.85em;color:#666">Fechar sessão (desliga o pod)</a>'
@@ -1085,14 +1234,17 @@ def _lobby_result_html(
 
     pending_html = ""
     if update_pending:
-        csrf = html.escape(ext_runtime.make_csrf(_settings.session_secret, owner_id, *_UPDATE_CSRF_SCOPE))
+        csrf = html.escape(ext_runtime.make_csrf(_settings.session_secret, owner_id, *_update_csrf_scope(profile)))
+        apply_action = f"/devs/{owner_id_html}/lobby/apply-update"
+        if profile != DEFAULT_PROFILE:
+            apply_action += f"?profile={html.escape(urllib.parse.quote(profile, safe=''))}"
         pending_html = (
             '<div style="border:2px solid #c80;padding:0.5rem 1rem;margin:1rem 0">'
             "<p><strong>Atualização pendente.</strong> A configuração do ambiente mudou "
             "(extensões ou imagem) e o pod em execução ainda usa a anterior. Ele só é "
             "recriado quando você aplicar: isso interrompe o que estiver rodando nele; "
             "o workspace é preservado.</p>"
-            f'<form method="post" action="/devs/{owner_id_html}/lobby/apply-update">'
+            f'<form method="post" action="{apply_action}">'
             f'<input type="hidden" name="csrf" value="{csrf}">'
             '<button type="submit">Aplicar atualização e reiniciar o pod</button>'
             "</form></div>"
@@ -1121,6 +1273,7 @@ def _run_lobby_session(
     identity_provider: str,
     region: str,
     allow_recreate: bool,
+    profile: str = DEFAULT_PROFILE,
 ) -> HTMLResponse:
     """Núcleo reaproveitado por `POST /devs/{owner_id}/lobby` (form
     recém-submetido) E por `GET /devs/{owner_id}/lobby` quando já existe
@@ -1139,7 +1292,7 @@ def _run_lobby_session(
     `allow_recreate`: o POST (escolha explícita do dev) libera a recriação
     do Pod por mudança de spec; o GET não -- aí a página mostra
     "atualização pendente"."""
-    provision_result = _do_provision(owner_id, wait=True, allow_recreate=allow_recreate)
+    provision_result = _do_provision(owner_id, wait=True, allow_recreate=allow_recreate, profile=profile)
 
     c = k8s_manager.get_clients(_settings)
     kiro_result = None
@@ -1155,7 +1308,7 @@ def _run_lobby_session(
         )
     except kiro_login.KiroLoginError as exc:
         kiro_error = str(exc)
-        logger.warning("kiro-login encadeado falhou pra owner_id=%s: %s", owner_id, exc)
+        logger.warning("kiro-login encadeado falhou pra owner_id=%s profile=%s: %s", owner_id, profile, exc)
 
     return HTMLResponse(
         _lobby_result_html(
@@ -1164,11 +1317,12 @@ def _run_lobby_session(
             kiro_result=kiro_result,
             kiro_error=kiro_error,
             update_pending=provision_result["update_pending"],
+            profile=profile,
             # Cartões das extensões carregam à parte (iframe -> GET
             # /extensions/cards): hooks de status nunca bloqueiam o lobby.
             extensions_html=(
                 ext_ui.render_cards_iframe(owner_id)
-                if ext_runtime.active_extensions(_settings, owner_id)
+                if ext_runtime.active_extensions(_settings, owner_id, profile=profile)
                 else ""
             ),
         )
@@ -1185,6 +1339,7 @@ def lobby_form(
             "salvo de uma execução anterior -- ver link 'Reconfigurar sessão'"
         ),
     ),
+    profile: str | None = Query(None, description="Profile da sessão (multi-profile); ausente = 'default'"),
     _owner: str = Depends(require_owner),
 ) -> HTMLResponse:
     """Primeira vez desse owner_id (nenhum registro, ou registro sem
@@ -1201,12 +1356,17 @@ def lobby_form(
     MESMOS valores salvos da vez anterior (`_run_lobby_session`, mesma
     função que o POST usa -- não duplica a lógica aqui), e mostra a
     MESMA página final de resultado. Pensado pra "eu já configurei uma
-    vez, só quero voltar pro dashboard" não pedir o form de novo."""
+    vez, só quero voltar pro dashboard" não pedir o form de novo.
+
+    `?profile=` (multi-profile): tudo acima vale POR profile -- cada
+    sessão (`default`, `work`, ...) tem seu próprio registro, form e
+    página de resultado. Ausente = `default`."""
+    profile = _resolve_profile(profile)
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get(conn, owner_id, profile)
 
     if reconfigure or row is None or not row["login_mode"]:
-        return HTMLResponse(_lobby_form_html(owner_id))
+        return HTMLResponse(_lobby_form_html(owner_id, profile=profile))
 
     return _run_lobby_session(
         owner_id,
@@ -1214,6 +1374,7 @@ def lobby_form(
         identity_provider=row["login_identity_provider"] or "",
         region=row["login_region"] or "",
         allow_recreate=False,
+        profile=profile,
     )
 
 
@@ -1224,6 +1385,7 @@ def lobby_submit(
     login_mode: str = Form(...),
     identity_provider: str = Form(""),
     region: str = Form(""),
+    profile: str | None = Query(None, description="Profile da sessão (multi-profile); ausente = 'default'"),
     form_fields: dict[str, str] = Depends(_form_fields),
     _owner: str = Depends(require_owner),
 ) -> HTMLResponse:
@@ -1242,9 +1404,13 @@ def lobby_submit(
     liga/desliga extensões e grava segredos. Chamada programática com
     `Authorization: Bearer` dispensa o token (o browser não envia esse
     header sozinho)."""
+    # Profile vem da query (o action do form gerado por _lobby_form_html
+    # o carrega) com fallback pro campo hidden -- resolvido ANTES do CSRF,
+    # porque o escopo do token anti-CSRF é por profile.
+    profile = _resolve_profile(profile or form_fields.get("profile"))
     bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
     if not bearer and not ext_runtime.verify_csrf(
-        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_LOBBY_CSRF_SCOPE
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_lobby_csrf_scope(profile)
     ):
         raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
     if login_mode not in kiro_login.MODES:
@@ -1268,13 +1434,13 @@ def lobby_submit(
                 ),
             )
 
-    ext_changes, ext_errors = ext_runtime.parse_form(_settings, owner_id, form_fields)
+    ext_changes, ext_errors = ext_runtime.parse_form(_settings, owner_id, form_fields, profile=profile)
     if ext_errors:
-        return HTMLResponse(_lobby_form_html(owner_id, ext_errors=ext_errors), status_code=400)
+        return HTMLResponse(_lobby_form_html(owner_id, ext_errors=ext_errors, profile=profile), status_code=400)
     try:
-        ext_runtime.save_form(_settings, owner_id, ext_changes)
+        ext_runtime.save_form(_settings, owner_id, ext_changes, profile=profile)
     except Exception as exc:
-        logger.error("falha ao salvar a config das extensões de owner_id=%s", owner_id, exc_info=True)
+        logger.error("falha ao salvar a config das extensões de owner_id=%s profile=%s", owner_id, profile, exc_info=True)
         raise HTTPException(status_code=502, detail="falha ao salvar a configuração das extensões") from exc
 
     with store.connect(_settings.db_path) as conn:
@@ -1284,6 +1450,7 @@ def lobby_submit(
             mode=login_mode,
             identity_provider=resolved_identity_provider or "",
             region=resolved_region or "",
+            profile=profile,
         )
 
     return _run_lobby_session(
@@ -1292,6 +1459,7 @@ def lobby_submit(
         identity_provider=resolved_identity_provider or "",
         region=resolved_region or "",
         allow_recreate=True,
+        profile=profile,
     )
 
 
@@ -1299,53 +1467,112 @@ def lobby_submit(
 def lobby_apply_update(
     owner_id: str,
     request: Request,
+    profile: str | None = Query(None, description="Profile da sessão (multi-profile); ausente = 'default'"),
     form_fields: dict[str, str] = Depends(_form_fields),
     _owner: str = Depends(require_owner),
 ) -> RedirectResponse:
     """Aplica a "atualização pendente": reconcilia permitindo recriar o
     Pod (interrompe o que roda nele; o workspace fica no PVC) e volta
-    (303) pro lobby. Mesma regra anti-CSRF do `POST /lobby`."""
+    (303) pro lobby. Mesma regra anti-CSRF do `POST /lobby` (escopo por
+    profile)."""
+    profile = _resolve_profile(profile or form_fields.get("profile"))
     bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
     if not bearer and not ext_runtime.verify_csrf(
-        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_UPDATE_CSRF_SCOPE
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_update_csrf_scope(profile)
     ):
         raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
-    _do_provision(owner_id, wait=True, allow_recreate=True)
-    return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby", status_code=303)
+    _do_provision(owner_id, wait=True, allow_recreate=True, profile=profile)
+    lobby = f"/devs/{urllib.parse.quote(owner_id, safe='@')}/lobby"
+    if profile != DEFAULT_PROFILE:
+        lobby += f"?profile={urllib.parse.quote(profile, safe='')}"
+    return RedirectResponse(lobby, status_code=303)
+
+
+@app.get("/devs/{owner_id}/profiles")
+def list_dev_profiles(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+    """Lista as sessões (profiles) provisionadas deste owner_id -- a
+    superfície "quais sessões em paralelo eu tenho" do multi-profile.
+    Cada item traz profile/slug/namespace/host/status e a URL do lobby
+    pra entrar/alternar. Só retorna o que está no SQLite: um profile
+    nunca provisionado simplesmente não aparece (o dev o cria batendo no
+    lobby daquele profile)."""
+    with store.connect(_settings.db_path) as conn:
+        rows = store.list_profiles(conn, owner_id)
+    owner_q = urllib.parse.quote(owner_id, safe="@")
+    profiles = []
+    for row in rows:
+        p = row["profile"]
+        lobby = f"/devs/{owner_q}/lobby"
+        if p != DEFAULT_PROFILE:
+            lobby += f"?profile={urllib.parse.quote(p, safe='')}"
+        profiles.append(
+            {
+                "profile": p,
+                "slug": row["slug"],
+                "namespace": row["namespace"],
+                "host": row["host"],
+                "status": row["status"],
+                "lobby_url": lobby,
+            }
+        )
+    return {"owner_id": owner_id, "profiles": profiles}
 
 
 @app.get("/devs/{owner_id}")
-def get_dev(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+def get_dev(
+    owner_id: str,
+    profile: str | None = Query(None, description="Profile da sessão; ausente = 'default'"),
+    _owner: str = Depends(require_owner),
+) -> dict:
     """Lookup do registro de um dev específico. Protegido por
-    `require_owner` (mesmo guard de `/provision`/`/session`/`/lobby`)."""
+    `require_owner` (mesmo guard de `/provision`/`/session`/`/lobby`).
+    `?profile=` seleciona qual sessão do owner_id ler (ausente =
+    `default`)."""
+    profile = _resolve_profile(profile)
     with store.connect(_settings.db_path) as conn:
-        row = store.get(conn, owner_id)
+        row = store.get(conn, owner_id, profile)
     if row is None:
         raise HTTPException(status_code=404, detail="owner_id não provisionado")
     return dict(row)
 
 
 @app.get("/devs/{owner_id}/extensions")
-def extensions_status(owner_id: str, _owner: str = Depends(require_owner)) -> dict:
+def extensions_status(
+    owner_id: str,
+    profile: str | None = Query(None, description="Profile da sessão; ausente = 'default'"),
+    _owner: str = Depends(require_owner),
+) -> dict:
     """Estado (JSON) das extensões habilitadas pelo admin: `state`,
     `conditions` e ações disponíveis de cada uma."""
-    views = ext_runtime.evaluate(_settings, owner_id)
+    views = ext_runtime.evaluate(_settings, owner_id, profile=_resolve_profile(profile))
     return {"extensions": [v.to_json() for v in views]}
 
 
+# Escopo do componente action_id do token anti-CSRF das ações de extensão,
+# amarrado ao profile (multi-profile) -- assim um token do cartão do
+# profile "work" não vale pra disparar a mesma ação no profile "home".
+def _ext_action_scope(action_id: str, profile: str) -> str:
+    return f"{action_id}:{profile}"
+
+
 @app.get("/devs/{owner_id}/extensions/cards", response_class=HTMLResponse)
-def extensions_cards(owner_id: str, _owner: str = Depends(require_owner)) -> HTMLResponse:
+def extensions_cards(
+    owner_id: str,
+    profile: str | None = Query(None, description="Profile da sessão; ausente = 'default'"),
+    _owner: str = Depends(require_owner),
+) -> HTMLResponse:
     """Cartões das extensões (HTML puro, sem JS). Embutido via `<iframe>`
     na página final do lobby; recarrega sozinho (`meta refresh`) conforme
     `ext_runtime.wants_refresh`."""
-    views = ext_runtime.evaluate(_settings, owner_id)
+    profile = _resolve_profile(profile)
+    views = ext_runtime.evaluate(_settings, owner_id, profile=profile)
     refresh = 5 if ext_runtime.wants_refresh(views) else None
     return HTMLResponse(
         ext_ui.render_cards_document(
             owner_id,
             [v.card_view() for v in views],
             lambda ext_id, action_id: ext_runtime.make_csrf(
-                _settings.session_secret, owner_id, ext_id, action_id
+                _settings.session_secret, owner_id, ext_id, _ext_action_scope(action_id, profile)
             ),
             refresh_seconds=refresh,
         )
@@ -1358,24 +1585,29 @@ def extension_action(
     ext_id: str,
     action_id: str,
     request: Request,
+    profile: str | None = Query(None, description="Profile da sessão; ausente = 'default'"),
     form_fields: dict[str, str | list[str]] = Depends(_form_fields_multi),
     _owner: str = Depends(require_owner),
 ):
     """Executa uma ação declarada pela extensão. Browser (cookie de
     sessão): exige o token anti-CSRF do cartão (HMAC amarrado a
-    owner+extensão+ação, com validade) e responde 303 de volta aos
+    owner+extensão+ação+profile, com validade) e responde 303 de volta aos
     cartões. Chamada programática com `Authorization: Bearer`: sem CSRF
     (o header não é enviado automaticamente pelo browser) e resposta
     JSON."""
+    profile = _resolve_profile(profile)
     bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
     if not bearer and not ext_runtime.verify_csrf(
-        _settings.session_secret, str(form_fields.get("csrf", "")), owner_id, ext_id, action_id
+        _settings.session_secret, str(form_fields.get("csrf", "")), owner_id, ext_id, _ext_action_scope(action_id, profile)
     ):
         raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
     try:
-        result = ext_runtime.run_action(_settings, owner_id, ext_id, action_id, form_fields)
+        result = ext_runtime.run_action(_settings, owner_id, ext_id, action_id, form_fields, profile=profile)
     except ext_runtime.ActionRejected as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if bearer or not _wants_html(request):
         return {"ok": result.ok, "message": result.message}
-    return RedirectResponse(f"/devs/{urllib.parse.quote(owner_id, safe='@')}/extensions/cards", status_code=303)
+    cards = f"/devs/{urllib.parse.quote(owner_id, safe='@')}/extensions/cards"
+    if profile != DEFAULT_PROFILE:
+        cards += f"?profile={urllib.parse.quote(profile, safe='')}"
+    return RedirectResponse(cards, status_code=303)
