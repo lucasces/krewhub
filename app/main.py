@@ -1087,6 +1087,17 @@ def _update_csrf_scope(profile: str) -> tuple[str, str]:
     return ("_lobby", f"update:{profile}")
 
 
+# Escopo anti-CSRF do "fechar ESTE profile" da página de perfis
+# (`POST /devs/{owner_id}/profiles/close`). Diferente do `/close` legado
+# (que lê o profile do PRÓPRIO token, require_session_profile): aqui o
+# profile a fechar vem do form (o dev clica em "Fechar" numa linha
+# qualquer da lista), então o token anti-CSRF é escopado POR profile --
+# um token gerado pra fechar "work" não vale pra fechar "home", mesmo
+# alvo de CSRF do mesmo owner.
+def _profile_close_csrf_scope(profile: str) -> tuple[str, str]:
+    return ("_profiles", f"close:{profile}")
+
+
 def _lobby_csrf(owner_id: str, profile: str = DEFAULT_PROFILE) -> str:
     return ext_runtime.make_csrf(_settings.session_secret, owner_id, *_lobby_csrf_scope(profile))
 
@@ -1216,6 +1227,9 @@ def _lobby_result_html(
         reconfigure_qs += f"&profile={html.escape(urllib.parse.quote(profile, safe=''))}"
     session_links_html = (
         f'<p style="margin-top:2rem">'
+        f'<a href="/devs/{owner_id_html}/profiles/ui" style="font-size:0.85em;color:#666">'
+        "Minhas sessões / perfis</a>"
+        ' &nbsp;|&nbsp; '
         f'<a href="/devs/{owner_id_html}/lobby{reconfigure_qs}" style="font-size:0.85em;color:#666">'
         "Reconfigurar sessão</a>"
         ' &nbsp;|&nbsp; '
@@ -1516,6 +1530,245 @@ def list_dev_profiles(owner_id: str, _owner: str = Depends(require_owner)) -> di
             }
         )
     return {"owner_id": owner_id, "profiles": profiles}
+
+
+def _lobby_url_for(owner_id: str, profile: str) -> str:
+    """URL do lobby pra ENTRAR/alternar num profile. `default` fica SEM
+    query string (backward-compat de URL/testes, idêntico ao JSON
+    `list_dev_profiles`); os demais levam `?profile=<nome>`."""
+    owner_q = urllib.parse.quote(owner_id, safe="@")
+    lobby = f"/devs/{owner_q}/lobby"
+    if profile != DEFAULT_PROFILE:
+        lobby += f"?profile={urllib.parse.quote(profile, safe='')}"
+    return lobby
+
+
+def _profiles_ui_html(
+    owner_id: str,
+    rows: list,
+    *,
+    active_profile: str | None,
+    error: str | None = None,
+) -> str:
+    """Página HTML (puro, sem JS/framework -- mesmo estilo de
+    `_lobby_form_html`/`_lobby_result_html`) pra GERENCIAR os profiles do
+    dev: lista as sessões provisionadas em paralelo, marca a ativa (a do
+    cookie/token de quem está vendo a página), e dá os controles de
+    entrar/fechar por linha + criar um profile novo.
+
+    `active_profile` vem do PRÓPRIO token (nunca de query), então o
+    marcador "(sessão atual)" só aparece quando o cookie que carregou a
+    página é daquele profile. Linhas em status `closed`/`lobby_pending`
+    aparecem na lista (o dev vê que existem e pode reentrar), mas sem o
+    botão "Fechar" -- não há pod pra desligar."""
+    owner_id_html = html.escape(owner_id)
+    error_html = (
+        f'<p style="color:#b00;font-weight:bold">{html.escape(error)}</p>' if error else ""
+    )
+
+    rows_html_parts: list[str] = []
+    for row in rows:
+        p = row["profile"]
+        p_html = html.escape(p)
+        slug_html = html.escape(row["slug"] or "")
+        host_html = html.escape(row["host"] or "")
+        status = row["status"] or ""
+        status_html = html.escape(status)
+        is_active = active_profile is not None and p == active_profile
+        active_marker = (
+            ' <strong style="color:#070">(sessão atual)</strong>' if is_active else ""
+        )
+        enter_link = (
+            f'<a href="{html.escape(_lobby_url_for(owner_id, p))}">Entrar</a>'
+        )
+
+        # "Fechar" só faz sentido quando há workload de verdade pra
+        # desligar: uma linha `closed` já está desligada e uma
+        # `lobby_pending` nunca provisionou (namespace/slug vazios). Nesses
+        # casos só mostramos "Entrar" (que reconstrói via lobby). Para as
+        # demais, um form POST por-linha, com token anti-CSRF escopado
+        # NAQUELE profile (ver `_profile_close_csrf_scope`).
+        if status in ("closed", "lobby_pending"):
+            close_html = '<span style="color:#999;font-size:0.85em">—</span>'
+        else:
+            csrf = html.escape(
+                ext_runtime.make_csrf(
+                    _settings.session_secret, owner_id, *_profile_close_csrf_scope(p)
+                )
+            )
+            close_action = f"/devs/{owner_id_html}/profiles/close"
+            close_html = (
+                f'<form method="post" action="{close_action}" style="display:inline">'
+                f'<input type="hidden" name="csrf" value="{csrf}">'
+                f'<input type="hidden" name="profile" value="{p_html}">'
+                '<button type="submit" style="font-size:0.85em">Fechar</button>'
+                "</form>"
+            )
+
+        rows_html_parts.append(
+            "<tr>"
+            f"<td><code>{p_html}</code>{active_marker}</td>"
+            f"<td><code>{slug_html}</code></td>"
+            f"<td><code>{host_html}</code></td>"
+            f"<td>{status_html}</td>"
+            f"<td>{enter_link}</td>"
+            f"<td>{close_html}</td>"
+            "</tr>"
+        )
+
+    if rows_html_parts:
+        rows_html = "\n".join(rows_html_parts)
+    else:
+        rows_html = (
+            '<tr><td colspan="6"><em>Nenhuma sessão provisionada ainda -- '
+            "crie uma abaixo.</em></td></tr>"
+        )
+
+    # Criar profile: o form só leva o dev pro lobby daquele profile
+    # (GET), que provisiona/entra. A validação de verdade do nome mora em
+    # `_resolve_profile` (a rota GET /profiles/new a chama); o
+    # `pattern`/`maxlength` no input é só uma primeira barreira no
+    # browser, nunca a autoridade.
+    create_action = f"/devs/{owner_id_html}/profiles/new"
+    create_html = (
+        f'<form method="get" action="{create_action}" style="margin-top:1.5rem">'
+        "<fieldset><legend>Criar um novo perfil</legend>"
+        '<label>Nome do perfil (1..32 chars, <code>[a-z0-9-]</code>, '
+        'ex.: <code>work</code>, <code>home-2</code>):<br>'
+        '<input type="text" name="profile" required maxlength="32" '
+        'pattern="[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?" size="32" '
+        'placeholder="work"></label> '
+        '<button type="submit">Criar / entrar</button>'
+        "</fieldset></form>"
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="pt-br">
+<head><meta charset="utf-8"><title>KrewHub -- minhas sessões / perfis</title></head>
+<body style="font-family: sans-serif; max-width: 760px; margin: 2rem auto;">
+  <h1>Minhas sessões / perfis</h1>
+  <p>Dev: <code>{owner_id_html}</code></p>
+  <p style="font-size:0.9em;color:#555">Cada perfil é uma sessão de dev
+  isolada e em paralelo (namespace/host/extensões próprios). O perfil
+  <code>default</code> é a sua sessão de sempre.</p>
+  {error_html}
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
+    <thead><tr>
+      <th align="left">Perfil</th><th align="left">Slug</th>
+      <th align="left">Host</th><th align="left">Status</th>
+      <th align="left">Entrar</th><th align="left">Fechar</th>
+    </tr></thead>
+    <tbody>
+{rows_html}
+    </tbody>
+  </table>
+  {create_html}
+</body>
+</html>"""
+
+
+@app.get("/devs/{owner_id}/profiles/ui", response_class=HTMLResponse)
+def profiles_ui(
+    owner_id: str,
+    request: Request,
+    _owner: str = Depends(require_owner),
+) -> HTMLResponse:
+    """Página HTML de gerência dos profiles deste owner_id -- a
+    superfície humana sobre o `GET /devs/{owner_id}/profiles` (que só
+    serve JSON). Lista as sessões em paralelo, marca a ativa (a do
+    cookie/token que carregou a página), e dá os controles de
+    entrar/fechar por perfil + criar um novo. Protegida por
+    `require_owner` (mesmo guard do JSON e do lobby).
+
+    O marcador de "sessão atual" vem do PRÓPRIO token (nunca de query) --
+    lido via `_verify_session_checked`, melhor-esforço: se o token não
+    carrega profile ou falha a leitura, a página ainda renderiza, só sem
+    o marcador (ninguém fica sem ver a lista por causa disso)."""
+    active_profile: str | None = None
+    token = _extract_token(request)
+    if token:
+        try:
+            tok_owner, tok_profile = _verify_session_checked(token)
+            if tok_owner == owner_id:
+                active_profile = tok_profile
+        except (auth.AuthTokenError, sqlite3.Error):
+            active_profile = None
+
+    with store.connect(_settings.db_path) as conn:
+        rows = store.list_profiles(conn, owner_id)
+    return HTMLResponse(_profiles_ui_html(owner_id, rows, active_profile=active_profile))
+
+
+@app.get("/devs/{owner_id}/profiles/new")
+def profiles_new(
+    owner_id: str,
+    profile: str | None = Query(None, description="Nome do novo profile a criar/entrar"),
+    _owner: str = Depends(require_owner),
+) -> RedirectResponse:
+    """Criar/entrar num profile a partir do form da página de perfis:
+    valida o nome com `_resolve_profile` (mesma régua de todo endpoint
+    dev -- 400 se inválido) e redireciona pro lobby DAQUELE profile, que
+    provisiona/entra (idempotente). `default` é um nome válido e só leva
+    o dev de volta ao lobby de sempre.
+
+    Deliberadamente um 302 pro lobby em vez de provisionar aqui: o lobby
+    já é o único ponto que provisiona/entra numa sessão, com o form de
+    login e toda a lógica idempotente -- esta rota é só o atalho
+    "criar e ir pra lá" da UI."""
+    resolved = _resolve_profile(profile)
+    return RedirectResponse(_lobby_url_for(owner_id, resolved), status_code=302)
+
+
+@app.post("/devs/{owner_id}/profiles/close", response_class=HTMLResponse)
+def profiles_close(
+    owner_id: str,
+    request: Request,
+    profile: str = Form(...),
+    form_fields: dict[str, str] = Depends(_form_fields),
+    _owner: str = Depends(require_owner),
+) -> HTMLResponse:
+    """Fecha o workload de UM profile específico deste owner_id a partir
+    da página de perfis -- o complemento do `GET /close` legado, que só
+    fecha o profile do PRÓPRIO token. Aqui o dev clica em "Fechar" numa
+    linha qualquer da lista, então o profile-alvo vem do FORM (validado
+    por `_resolve_profile`), não do token.
+
+    Protegido por `require_owner` (só o próprio dono age sobre o próprio
+    owner_id -- nunca fecha o pod de outro dev) E por token anti-CSRF
+    escopado NAQUELE profile (`_profile_close_csrf_scope`, mesmo HMAC das
+    ações do lobby), senão 403: este POST desliga infraestrutura k8s de
+    verdade. Chamada programática com `Authorization: Bearer` dispensa o
+    token (o browser não envia esse header sozinho). Reaproveita o MESMO
+    núcleo `_close_dev_session(profile=...)` do `/close`/`/logout` -- não
+    duplica teardown. Owner nunca provisionado nesse profile -> 404."""
+    profile = _resolve_profile(profile)
+    bearer = (request.headers.get("authorization") or "").lower().startswith("bearer ")
+    if not bearer and not ext_runtime.verify_csrf(
+        _settings.session_secret, form_fields.get("csrf", ""), owner_id, *_profile_close_csrf_scope(profile)
+    ):
+        raise HTTPException(status_code=403, detail="token anti-CSRF inválido ou expirado")
+
+    try:
+        _close_dev_session(owner_id, profile=profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except k8s_manager.TeardownError as exc:
+        raise HTTPException(status_code=502, detail=f"desligar o workload falhou: {exc}") from exc
+
+    # Volta pra lista (re-renderizada, agora com o profile em `closed`) --
+    # mesma página, sem redirect, pra o dev ver o efeito na hora.
+    active_profile: str | None = None
+    token = _extract_token(request)
+    if token:
+        try:
+            tok_owner, tok_profile = _verify_session_checked(token)
+            if tok_owner == owner_id:
+                active_profile = tok_profile
+        except (auth.AuthTokenError, sqlite3.Error):
+            active_profile = None
+    with store.connect(_settings.db_path) as conn:
+        rows = store.list_profiles(conn, owner_id)
+    return HTMLResponse(_profiles_ui_html(owner_id, rows, active_profile=active_profile))
 
 
 @app.get("/devs/{owner_id}")
