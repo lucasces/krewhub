@@ -38,11 +38,11 @@ treated as a release candidate. `release.yml`:
 - Packages the chart with `version`/`appVersion` set to `1.2.3-rc.1` and
   pushes it to `oci://ghcr.io/<owner>/charts`.
 - Also pushes the `krewhub-ext-aws-sso` sidecar image tagged `1.2.3-rc.1`.
-- If the tag contains `-rc.` (e.g. `v0.2.0-rc.9`), also pushes a test
-  image of `krewhub-central` with the in-tree extensions (`aws-sso`,
-  `github`) installed, tagged `aws-sso-github-test-0.2.0-rc.9`, for trying
-  extensions on a cluster. Other pre-release tags such as `-beta.N`
-  do not publish it, and neither do stable tags.
+- Also pushes a `krewhub-central` image with the in-tree extensions
+  (`aws-sso`, `github`) installed, tagged `aws-sso-github-test-1.2.3-rc.1`,
+  for trying extensions on a cluster. (A stable tag publishes the same
+  image under the `aws-sso-github-` prefix instead — see "Promoting to a
+  stable release".)
 - Publishing starts immediately once CI passes — no approval step.
 
 ## Promoting to a stable release
@@ -57,7 +57,9 @@ git push origin v1.2.3
 
 This is a clean `MAJOR.MINOR.PATCH` tag, so `release.yml` treats it as
 stable: image tagged `1.2.3` **and** `latest`, chart packaged/pushed as
-`1.2.3`.
+`1.2.3`. The in-tree extensions image is also published, under the
+`aws-sso-github-` prefix (`aws-sso-github-1.2.3`) — the non-`-test-` form
+of the RC image, never tagged `latest`.
 
 There's no dedicated "promote" command — a stable tag is just a normal
 `v*` tag that happens to be pre-release-suffix-free. Nothing carries

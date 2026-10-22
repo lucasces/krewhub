@@ -112,9 +112,11 @@ Two separate steps with two different owners:
    The published `krewhub-central` image of a stable release does **not**
    include any extension: the release workflow builds it without
    `KREWHUB_EXTENSIONS`. To use extensions, build your own image with that
-   build argument (see below), or try the test image that release
-   candidate tags (`-rc.`) publish as `krewhub-central:aws-sso-github-test-<version>`,
-   which has `aws-sso` and `github` installed.
+   build argument (see below), or use the extensions image the release
+   workflow publishes on every tag alongside it: stable tags publish it as
+   `krewhub-central:aws-sso-github-<version>` and release candidate (`-rc.`)
+   tags as `krewhub-central:aws-sso-github-test-<version>`, both with
+   `aws-sso` and `github` installed.
 
 2. **Enabled** — the administrator lists the extension ids in
    `KREWHUB_EXTENSIONS_ENABLED` (comma-separated; Helm value
@@ -411,7 +413,8 @@ krewhubCentral:
 `enabled` only takes effect if the `krewhub-central` image you deploy has
 the extension installed: the stable image does not (see "Installing and
 enabling"), so point `krewhubCentral.image.repository` and `krewhubCentral.image.tag`
-at your own build or at an `aws-sso-github-test-<version>` image.
+at your own build or at an `aws-sso-github-<version>` (stable) /
+`aws-sso-github-test-<version>` (release candidate) image.
 
 ## GitHub (`github`)
 
